@@ -3,5 +3,6 @@
     "board": "esp8266:esp8266:d1_mini",
     "sketch": "coffee_machine_scale.ino",
     "output": "../temporary/arduino_build",
-    "intelliSenseGen": "global"
+    "intelliSenseGen": "global",
+    "port": "10.0.1.28"
 }

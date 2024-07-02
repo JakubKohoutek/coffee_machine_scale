@@ -10,6 +10,7 @@
 #include "ota.h"
 #include "memory.h"
 #include "rotary_encoder.h"
+#include "icons.h"
 
 #define ENCODER_A       14   // Must be an interrupt pin for sufficient reliability
 #define ENCODER_B       12   // Must be an interrupt pin for sufficient reliability
@@ -76,18 +77,20 @@ Button         pushButton(ENCODER_BUTTON);
 HX711          loadcellA;
 HX711          loadcellB;
 
-void drawMessage(const char *message, uint8_t row = 0) {
+void drawMessage(const char *message) {
   display.firstPage();
   do {
     display.setFont(SMALL_FONT);
-    display.drawStr(0, 15 * (row + 1), message);
+    unsigned short stringWidth = display.getStrWidth(message);
+    display.drawStr(64 - stringWidth / 2, 60, message);
+    display.drawXBMP(64 - scaleIconBitmapWidth / 2, 0, scaleIconBitmapWidth, scaleIconBitmapHeight, scaleIconBitmap);
   } while (display.nextPage());
 }
 
 void showGrams(unsigned long milligrams, const char *title) {
   unsigned int grams = milligrams / 1000;
   byte gramDecimals = (milligrams % 1000) / 100;
-  String gramsString = String(grams) + "," + String(gramDecimals);
+  String gramsString = String(grams) + "." + String(gramDecimals);
 
   display.firstPage();
   do {
@@ -247,15 +250,26 @@ void setup() {
   display.begin();
   display.setBusClock(BUS_CLOCK_SPEED);
 
+  display.firstPage();
+  do {
+    display.drawXBMP(
+      64 - coffeeIconBitmapWidth / 2,
+      32 - coffeeIconBitmapHeight / 2,
+      coffeeIconBitmapWidth,
+      coffeeIconBitmapHeight,
+      coffeeIconBitmap
+    );
+  } while (display.nextPage());
+
   // Start WiFi
   turnOnWiFi();
 
   // Inititate eeprom memory
   initiateMemory();
-  //  writeToMemory(SINGLE_DOSE_ADDRESS, 0);
-  //  writeToMemory(DOUBLE_DOSE_ADDRESS, 0);
-  //  writeToMemory(STATISTICS_ADDRESS, 0);
-  //  writeToMemory(LAST_TIME_ADDRESS, 0);
+  // writeToMemory(SINGLE_DOSE_ADDRESS, 0);
+  // writeToMemory(DOUBLE_DOSE_ADDRESS, 0);
+  // writeToMemory(STATISTICS_ADDRESS, 0);
+  // writeToMemory(LAST_TIME_ADDRESS, 0);
   singleShotLimit = readFromMemory(SINGLE_DOSE_ADDRESS);
   doubleShotLimit = readFromMemory(DOUBLE_DOSE_ADDRESS);
   grindedDosesCount = readFromMemory(STATISTICS_ADDRESS);
@@ -401,7 +415,6 @@ void handleLongButtonPush() {
     case MenuScreen:
       if (*selectedItem == SingleDose || *selectedItem == DoubleDose) {
         currentScreen = SettingsScreen;
-        drawMessage(getMenuItemString(*selectedItem));
         showGrams(*selectedItem == SingleDose ? singleShotLimit : doubleShotLimit, getMenuItemString(*selectedItem));
         break;
       }
@@ -452,7 +465,7 @@ void startExtraction(MenuItem selectedItem) {
   const int weightArraySize = 5;  // Size of the array
   float weightArray[weightArraySize] = { 0 };
 
-  drawMessage("Taring...", 0);
+  drawMessage("Taring...");
   loadcellA.tare();
   loadcellB.tare();
 
