@@ -5,6 +5,7 @@
 #include <JC_Button.h>
 #include <Arduino.h>
 #include <U8g2lib.h>
+#include <LittleFS.h>
 #include "HX711.h"
 
 #include "ota.h"
@@ -116,12 +117,12 @@ unsigned long *getCoeffPtr() {
   return selectedPortafilter == BottomLess ? &doubleNakedCoeff : &doubleSpoutedCoeff;
 }
 
-float getTotalWeight() {
+float getCurrentWeight() {
   float loadCellAWeight = loadcellA.get_units();
   float loadCellBWeight = loadcellB.get_units();
-  float totalWeight = loadCellAWeight + loadCellBWeight;
+  float currentWeight = loadCellAWeight + loadCellBWeight;
 
-  return totalWeight;
+  return currentWeight;
 }
 
 void showScale(const char *message) {
@@ -143,7 +144,7 @@ void showScale(const char *message) {
       if (i > 0) {
         weightArray[i] = weightArray[i - 1];
       } else {
-        weightArray[i] = getTotalWeight() + driftCoefficient;
+        weightArray[i] = getCurrentWeight() + driftCoefficient;
       }
       weightSum += weightArray[i];
       if (abs(weightArray[i]) > 0.1) {
@@ -349,7 +350,11 @@ void setup() {
 
   // Set up the html server
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
-    request->send(200, "text/plain", "The coffee machine scale is ready");
+    request->send(LittleFS, "/index.html", "text/html");
+  });
+
+  server.on("/index.html", HTTP_GET, [](AsyncWebServerRequest *request) {
+    request->send(LittleFS, "/index.html", "text/html");
   });
 
   server.onRequestBody([](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
@@ -359,9 +364,12 @@ void setup() {
   server.onNotFound([](AsyncWebServerRequest *request) {
     request->send(404, "text/plain", "The coffee machine scale says: sorry, not found.");
   });
-
   // Start the server
   server.begin();
+
+  // Start the file system
+  LittleFS.begin();
+
   showMainMenu();
 }
 
@@ -572,22 +580,23 @@ void loop() {
     lastActivityMillis = millis();
   }
 
-  //    if (millis() - lastActivityMillis > 30000) {
-  //      sleep();
-  //    }
+  // if (millis() - lastActivityMillis > 30000) {
+  //   sleep();
+  // }
 }
 
 void startExtraction() {
   currentScreen = Timer;
 
-  float finalTime = 0.0f;
+  float timePassed = 0.0f;
   float timeLimit = 60.0f;  // Pump shouldn't run more than 60 senconds without rest
   bool stopped = false;
-  float totalWeight = 0.0f;
+  float currentWeight = 0.0f;
   float weightOfCoffeeExtractedAfterStop = *getCoeffPtr() / 1000;
   float weightLimit = *selectedItem == SingleDose ? singleShotLimit / 1000 : doubleShotLimit / 1000;
-  const int weightArraySize = 10;  // Size of the array
+  const int weightArraySize = 5;  // Size of the array
   float weightArray[weightArraySize] = { 0.0f };
+  int numberOfReadings = 0;
 
   showTaringScreen();
   loadcellA.tare();
@@ -598,7 +607,17 @@ void startExtraction() {
   // level of fault in the measurement once the pump is turned on. This variable helps to correct that
   float correctionWeight = 0.0f;
   bool correctionApplied = false;
-  float timeOfCorrection = 1.2f;
+  float timeOfCorrection = 1.2f; // TODO: move this to EEPROM and make it configurable
+
+  File file = LittleFS.open("/index.html", "w");
+  if (!file) {
+    WebSerial.println("Failed to open /index.html for writing");
+    return;
+  }
+
+  file.println("<!DOCTYPE html><html><head><title>Last extraction data</title></head>");
+  file.println("<body>");
+  file.println("<p>Time and weight array:</p><p>[");
 
   digitalWrite(RELAY_PIN, HIGH);
 
@@ -607,62 +626,90 @@ void startExtraction() {
     pushButton.read();
     if (pushButton.wasReleased()) {
       stopped = true;
+      file.println("]<p>");
+      file.println("<p>Finished, stopped manually</p>");
       break;
     }
 
     // Stop the extraction if we pass the safety time limit
-    finalTime = (float)(millis() - startTime) / 1000;
-    if (finalTime > timeLimit) {
+    timePassed = (float)(millis() - startTime) / 1000;
+    if (timePassed > timeLimit) {
       stopped = true;
+      file.println("]<p>");
+      file.println("<p>Finished, time limit exceeded</p>");
       break;
     }
 
+    // Get the current sensor reading
+    currentWeight = getCurrentWeight();
+
+    // Log the data into the file for debugging purposes
+    file.println(String("[") + timePassed + ", " + currentWeight + "],");
+
+    // Vibrations and voltage drop if the relay is switched on can cause incorrect weight readings 
+    // at the beginning of extraction. Ignore the readings before the tray, cups and other things settle in place.
+    if (timePassed < timeOfCorrection) {
+      showWeight(0, (String("Pouring: ") + String(timePassed, 1) + "s").c_str());
+      continue;
+    }
+
+    // zeroing the weight once, after timeOfCorrection passed.
+    if (!correctionApplied) {
+      correctionApplied = true;
+      correctionWeight = currentWeight;
+    }
+
+
     // Calculate the floating average of the extracted coffee weight
-    totalWeight = getTotalWeight();
-    float weightSum = 0.0f;
-    for (int i = weightArraySize - 1; i >= 0; i--) {
+    float weightArraySum = 0.0f;
+    numberOfReadings = numberOfReadings >= weightArraySize ? weightArraySize : numberOfReadings + 1;
+    for (int i = numberOfReadings - 1; i >= 0; i--) {
       if (i > 0) {
         weightArray[i] = weightArray[i - 1];
       } else {
-        weightArray[i] = totalWeight;
+        weightArray[i] = currentWeight;
       }
-      weightSum += weightArray[i];
+      weightArraySum += weightArray[i];
     }
-    float weightAverage = weightSum / weightArraySize;
 
-    // Vibrations and voltage drop if the relay is switched can cause incorrect weight readings 
-    // at the beginning of extraction. Here we compensate for that by zeroing the weight after 
-    // timeOfCorrection passed.
-    if (finalTime >= timeOfCorrection && !correctionApplied) {
-      correctionApplied = true;
-      correctionWeight = weightAverage;
+    float averageWeight = weightArraySum / numberOfReadings;
+    float correctedAverageWeight = averageWeight - correctionWeight;
+    // If the corrected average weight is negative, zero it out to the current level
+    if (correctedAverageWeight < 0.0f) {
+      correctionWeight = averageWeight;
+      correctedAverageWeight = 0;
     }
 
     // Finally, stop the extraction once we reach the target weight minus the weight of coffee
     // that is still poured after the extraction stops (configurable in settings)
-    float correctedWeightAverage = weightAverage - correctionWeight;
-    if (correctedWeightAverage > weightLimit - weightOfCoffeeExtractedAfterStop) {
+    if (correctedAverageWeight > weightLimit - weightOfCoffeeExtractedAfterStop) {
+      file.println("]<p>");
+      file.println(String("<p>Finished, correctedAverageWeight: ") + correctedAverageWeight + ", correctionWeight: " + correctionWeight + "</p>");
       break;
     }
 
     // Show the current weight of extracted coffee or zero until we get the weight correction
-    showWeight(correctionApplied ? correctedWeightAverage : 0, (String("Pouring: ") + String(finalTime, 1) + "s").c_str());
+    showWeight(correctionApplied ? correctedAverageWeight : 0, (String("Pouring: ") + String(timePassed, 1) + "s").c_str());
 
-    // Wait a moment before another loop iteration
-    delay(50);
+    // Allow module to execute necessary system operations in order to prevent
+    // unintended rebboting.
     yield();
   }
 
+  file.println("</body></html>");
+  file.close();
+  WebSerial.println("HTML content written to /index.html");
+
   digitalWrite(RELAY_PIN, LOW);
-  lastShotTime = int(finalTime * 1000);
+  lastShotTime = int(timePassed * 1000);
   writeToMemory(LAST_TIME_ADDRESS, lastShotTime);
 
   if (stopped) {
-    showScale((String("Stopped at ") + String(finalTime, 1) + "s").c_str());
+    showScale((String("Stopped at ") + String(timePassed, 1) + "s").c_str());
   } else {
     writeToMemory(
       STATISTICS_ADDRESS,
       grindedDosesCount += (*selectedItem == SingleDose ? 1 : 2));
-    showScale((String("Done at ") + String(finalTime, 1) + "s").c_str());
+    showScale((String("Done at ") + String(timePassed, 1) + "s").c_str());
   }
 }
