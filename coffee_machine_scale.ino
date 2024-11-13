@@ -42,7 +42,8 @@ enum MenuItem {
 
 enum Portafilter {
   BottomLess,
-  Spouted
+  Spouted,
+  Back
 };
 
 enum Screen {
@@ -81,10 +82,11 @@ unsigned long  doubleNakedCoeff      = 0;
 unsigned long  grindedDosesCount     = 0;
 unsigned long  lastShotTime          = 0;
 unsigned long  lastActivityMillis    = 0;
+bool           sleepModeActive       = false;
 Screen         currentScreen         = MenuScreen;
 MenuItem       mainMenu[]                = { Scale, DoubleDose, SingleDose, Info };
 MenuItem*      selectedItem          = mainMenu;
-Portafilter    portafilterMenu[]     = { Spouted, BottomLess };
+Portafilter    portafilterMenu[]     = { Spouted, BottomLess, Back };
 Portafilter    selectedPortafilter   = Spouted;
 short          menuLength            = sizeof(mainMenu) / sizeof(*mainMenu);
 short          portafilterMenuLength = sizeof(portafilterMenu) / sizeof(*portafilterMenu);
@@ -231,16 +233,15 @@ void showMainMenu() {
 void showPortafilterMenu() {
   currentScreen = PortafilterScreen;
 
-  display.firstPage();
-  do {
-    display.setFont(SMALL_FONT);
-    display.drawStr(0, 15, "Portafilter:");
-    for (short i = 0; i < portafilterMenuLength; i++) {
-      String selectionIndicator = selectedPortafilter == portafilterMenu[i] ? "> " : "  ";
-      String lineText = selectionIndicator + (portafilterMenu[i] == BottomLess ? "Bottomless" : "Spouted");
-      display.drawStr(0, 15 * (i + 2), lineText.c_str());
-    }
-  } while (display.nextPage());
+  display.clearBuffer();
+  display.setFont(SMALL_FONT);
+  display.drawStr(0, 15, "Portafilter:");
+  for (short i = 0; i < portafilterMenuLength; i++) {
+    String selectionIndicator = selectedPortafilter == portafilterMenu[i] ? "> " : "  ";
+    String lineText = selectionIndicator + (portafilterMenu[i] == BottomLess ? "Bottomless" : portafilterMenu[i] == Spouted ? "Spouted" : "Back");
+    display.drawStr(0, 15 * (i + 2), lineText.c_str());
+  }
+  display.sendBuffer();
 }
 
 void showWeight(float loadCellWeight, const char *title) {
@@ -287,90 +288,6 @@ void turnOnWiFi() {
   }
   Serial.println("\nConnected. IP address:");
   Serial.println(WiFi.localIP());
-}
-
-void setup() {
-  pinMode(RELAY_PIN, OUTPUT);
-  digitalWrite(RELAY_PIN, LOW);
-
-  pinMode(D3, OUTPUT);
-  digitalWrite(D3, LOW);
-  pinMode(D4, OUTPUT);
-  digitalWrite(D4, LOW);
-  Serial.begin(115200);
-
-  // Initiate rotary encoder
-  pinMode(ENCODER_BUTTON, INPUT_PULLUP);
-  initRotaryEncoder(ENCODER_A, ENCODER_B);
-
-  // Initiate load cells
-  loadcellA.begin(LOADCELL_1_DOUT_PIN, LOADCELL_1_SCK_PIN);
-  loadcellA.set_scale(LOADCELL_1_DIVIDER);
-  loadcellA.set_offset(LOADCELL_1_OFFSET);
-
-  loadcellB.begin(LOADCELL_2_DOUT_PIN, LOADCELL_2_SCK_PIN);
-  loadcellB.set_scale(LOADCELL_2_DIVIDER);
-  loadcellB.set_offset(LOADCELL_2_OFFSET);
-
-  // Initiate the display
-  display.begin();
-  display.setBusClock(BUS_CLOCK_SPEED);
-
-  showWelcomeScreen();
-
-  // Start WiFi
-  turnOnWiFi();
-
-  // Inititate eeprom memory
-  initiateMemory();
-  // writeToMemory(SINGLE_DOSE_ADDRESS, 0);
-  // writeToMemory(DOUBLE_DOSE_ADDRESS, 0);
-  // writeToMemory(STATISTICS_ADDRESS, 0);
-  // writeToMemory(LAST_TIME_ADDRESS, 0);
-  singleShotLimit = readFromMemory(SINGLE_DOSE_ADDRESS);
-  doubleShotLimit = readFromMemory(DOUBLE_DOSE_ADDRESS);
-  grindedDosesCount = readFromMemory(STATISTICS_ADDRESS);
-  lastShotTime = readFromMemory(LAST_TIME_ADDRESS);
-
-  // writeToMemory(SINGLE_SPOUT_ADDRESS, 0);
-  // writeToMemory(SINGLE_NAKED_ADDRESS, 0);
-  // writeToMemory(DOUBLE_SPOUT_ADDRESS, 0);
-  // writeToMemory(DOUBLE_NAKED_ADDRESS, 0);
-  singleSpoutedCoeff = readFromMemory(SINGLE_SPOUT_ADDRESS);;
-  singleNakedCoeff   = readFromMemory(SINGLE_NAKED_ADDRESS);;
-  doubleSpoutedCoeff = readFromMemory(DOUBLE_SPOUT_ADDRESS);;
-  doubleNakedCoeff   = readFromMemory(DOUBLE_NAKED_ADDRESS);;
-
-  // Initiate over the air programming
-  OTA::initialize(deviceId);
-
-  // Initiate WebSerial. It is accessible at "<IP Address>/webserial" in browser
-  WebSerial.begin(&server);
-  WebSerial.msgCallback(handleWebSerialMessage);
-
-  // Set up the html server
-  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
-    request->send(LittleFS, "/index.html", "text/html");
-  });
-
-  server.on("/index.html", HTTP_GET, [](AsyncWebServerRequest *request) {
-    request->send(LittleFS, "/index.html", "text/html");
-  });
-
-  server.onRequestBody([](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
-    // Handle any other body request here...
-  });
-
-  server.onNotFound([](AsyncWebServerRequest *request) {
-    request->send(404, "text/plain", "The coffee machine scale says: sorry, not found.");
-  });
-  // Start the server
-  server.begin();
-
-  // Start the file system
-  LittleFS.begin();
-
-  showMainMenu();
 }
 
 void handleWebSerialMessage(uint8_t *data, size_t len) {
@@ -463,7 +380,21 @@ void handleRotation(bool clockwise) {
       break;
     case PortafilterScreen:
       {
-        selectedPortafilter = selectedPortafilter == BottomLess ? Spouted : BottomLess;
+        if (clockwise) {
+          if (selectedPortafilter == Spouted)
+            selectedPortafilter = BottomLess;
+          else if (selectedPortafilter == BottomLess)
+            selectedPortafilter = Back;
+          else if (selectedPortafilter == Back)
+            selectedPortafilter = Spouted;
+        } else {
+          if (selectedPortafilter == Spouted)
+            selectedPortafilter = Back;
+          else if (selectedPortafilter == Back)
+            selectedPortafilter = BottomLess;
+          else if (selectedPortafilter == BottomLess)
+            selectedPortafilter = Spouted;
+        }
         showPortafilterMenu();
         break;
       }
@@ -503,6 +434,10 @@ void handleButtonPush() {
       }
     case PortafilterScreen:
       {
+        if (selectedPortafilter == Back) {
+          showMainMenu();
+          break;
+        }
         startExtraction();
         break;
       }
@@ -548,6 +483,9 @@ void handleLongButtonPush() {
       }
     case PortafilterScreen:
       {
+        if (selectedPortafilter == Back) {
+          return;
+        }
         currentScreen = WeightCoeffScreen;
         unsigned long * weightCoeffPtr = getCoeffPtr();
         showGramsWithTitle(*weightCoeffPtr, selectedPortafilter == BottomLess ? "Bottomless" : "Spouted");
@@ -557,32 +495,6 @@ void handleLongButtonPush() {
       return;
   }
   ignoreNextPush = true;
-}
-
-void loop() {
-  OTA::handle();
-
-  // Process change in the rotary encoder position
-  long newPosition = readRotaryEncoder();
-  if (newPosition != encoderPosition) {
-    handleRotation(newPosition - encoderPosition < 0);
-    encoderPosition = newPosition;
-    lastActivityMillis = millis();
-  }
-
-  // Process change in the button state
-  pushButton.read();
-  if (pushButton.wasReleased()) {
-    handleButtonPush();
-    lastActivityMillis = millis();
-  } else if (pushButton.pressedFor(LONG_PRESS_MS)) {
-    handleLongButtonPush();
-    lastActivityMillis = millis();
-  }
-
-  // if (millis() - lastActivityMillis > 30000) {
-  //   sleep();
-  // }
 }
 
 void startExtraction() {
@@ -711,5 +623,138 @@ void startExtraction() {
       STATISTICS_ADDRESS,
       grindedDosesCount += (*selectedItem == SingleDose ? 1 : 2));
     showScale((String("Done at ") + String(timePassed, 1) + "s").c_str());
+  }
+}
+
+bool goToSleepMode () {
+  if (sleepModeActive) {
+    return false;
+  }
+
+  sleepModeActive = true;
+  display.setPowerSave(1);
+  return true;
+}
+
+bool wakeUp () {
+  if (!sleepModeActive) {
+    return false;
+  }
+
+  sleepModeActive = false;
+  display.setPowerSave(0);
+  return true;
+}
+
+void setup() {
+  pinMode(RELAY_PIN, OUTPUT);
+  digitalWrite(RELAY_PIN, LOW);
+
+  pinMode(D3, OUTPUT);
+  digitalWrite(D3, LOW);
+  pinMode(D4, OUTPUT);
+  digitalWrite(D4, LOW);
+  Serial.begin(115200);
+
+  // Initiate rotary encoder
+  pinMode(ENCODER_BUTTON, INPUT_PULLUP);
+  initRotaryEncoder(ENCODER_A, ENCODER_B);
+
+  // Initiate load cells
+  loadcellA.begin(LOADCELL_1_DOUT_PIN, LOADCELL_1_SCK_PIN);
+  loadcellA.set_scale(LOADCELL_1_DIVIDER);
+  loadcellA.set_offset(LOADCELL_1_OFFSET);
+
+  loadcellB.begin(LOADCELL_2_DOUT_PIN, LOADCELL_2_SCK_PIN);
+  loadcellB.set_scale(LOADCELL_2_DIVIDER);
+  loadcellB.set_offset(LOADCELL_2_OFFSET);
+
+  // Initiate the display and show welcome screen as soon as possible
+  display.begin();
+  display.setBusClock(BUS_CLOCK_SPEED);
+  showWelcomeScreen();
+
+  // Start WiFi
+  turnOnWiFi();
+
+  // Inititate eeprom and load variables from persistent memory
+  initiateMemory();
+  singleShotLimit = readFromMemory(SINGLE_DOSE_ADDRESS);     // writeToMemory(SINGLE_DOSE_ADDRESS, 0);
+  doubleShotLimit = readFromMemory(DOUBLE_DOSE_ADDRESS);     // writeToMemory(DOUBLE_DOSE_ADDRESS, 0);
+  grindedDosesCount = readFromMemory(STATISTICS_ADDRESS);    // writeToMemory(STATISTICS_ADDRESS, 0);
+  lastShotTime = readFromMemory(LAST_TIME_ADDRESS);          // writeToMemory(LAST_TIME_ADDRESS, 0);
+  singleSpoutedCoeff = readFromMemory(SINGLE_SPOUT_ADDRESS); // writeToMemory(SINGLE_SPOUT_ADDRESS, 0);
+  singleNakedCoeff   = readFromMemory(SINGLE_NAKED_ADDRESS); // writeToMemory(SINGLE_NAKED_ADDRESS, 0);
+  doubleSpoutedCoeff = readFromMemory(DOUBLE_SPOUT_ADDRESS); // writeToMemory(DOUBLE_SPOUT_ADDRESS, 0);
+  doubleNakedCoeff   = readFromMemory(DOUBLE_NAKED_ADDRESS); // writeToMemory(DOUBLE_NAKED_ADDRESS, 0);
+
+  // Initiate over the air programming
+  OTA::initialize(deviceId);
+
+  // Initiate WebSerial. It is accessible at "<IP Address>/webserial" in browser
+  WebSerial.begin(&server);
+  WebSerial.msgCallback(handleWebSerialMessage);
+
+  // Set up the html server
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
+    request->send(LittleFS, "/index.html", "text/html");
+  });
+
+  server.on("/index.html", HTTP_GET, [](AsyncWebServerRequest *request) {
+    request->send(LittleFS, "/index.html", "text/html");
+  });
+
+  server.onRequestBody([](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+    // Handle any other body request here...
+  });
+
+  server.onNotFound([](AsyncWebServerRequest *request) {
+    request->send(404, "text/plain", "The coffee machine scale says: sorry, not found.");
+  });
+
+  // Start the server
+  server.begin();
+
+  // Start the file system
+  LittleFS.begin();
+
+  showMainMenu();
+}
+
+void loop() {
+  OTA::handle();
+
+  // Process change in the rotary encoder position
+  long newPosition = readRotaryEncoder();
+  if (newPosition != encoderPosition) {
+    lastActivityMillis = millis();
+    // Ignore the rotation that woke up the device from sleep
+    if (wakeUp()) {
+      return;
+    }
+    handleRotation(newPosition - encoderPosition < 0);
+    encoderPosition = newPosition;
+  }
+
+  // Process change in the button state
+  pushButton.read();
+  if (pushButton.wasReleased()) {
+    lastActivityMillis = millis();
+    // Ignore the press that woke up the device from sleep
+    if (wakeUp()) {
+      return;
+    }
+    handleButtonPush();
+  } else if (pushButton.pressedFor(LONG_PRESS_MS)) {
+    lastActivityMillis = millis();
+    // Ignore the long press that woke up the device from sleep
+    if (wakeUp()) {
+      return;
+    }
+    handleLongButtonPush();
+  }
+
+  if (millis() - lastActivityMillis > 5 * 60 * 1000) {
+    goToSleepMode();
   }
 }
