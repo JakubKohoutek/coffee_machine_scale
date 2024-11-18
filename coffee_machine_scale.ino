@@ -182,52 +182,48 @@ void showGramsWithTitle(unsigned long milligrams, const char *title) {
   byte gramDecimals = (milligrams % 1000) / 100;
   String gramsString = String(grams) + "." + String(gramDecimals);
 
-  display.firstPage();
-  do {
-    display.setFont(SMALL_FONT);
-    display.drawStr(0, 15, title);
-    display.setFont(LARGE_FONT);
-    unsigned short stringWidth = display.getStrWidth(grams < 10 ? "0:0" : "10:0");
-    display.drawStr(64 - stringWidth / 2, 55, gramsString.c_str());
-  } while (display.nextPage());
+  display.clearBuffer();
+  display.setFont(SMALL_FONT);
+  display.drawStr(0, 15, title);
+  display.setFont(LARGE_FONT);
+  unsigned short stringWidth = display.getStrWidth(grams < 10 ? "0:0" : "10:0");
+  display.drawStr(64 - stringWidth / 2, 55, gramsString.c_str());
+  display.sendBuffer();
 }
 
 void showWelcomeScreen() {
-  display.firstPage();
-  do {
-    display.drawXBMP(
-      64 - coffeeIconBitmapWidth / 2,
-      32 - coffeeIconBitmapHeight / 2,
-      coffeeIconBitmapWidth,
-      coffeeIconBitmapHeight,
-      coffeeIconBitmap
-    );
-  } while (display.nextPage());
+  display.clearBuffer();
+  display.drawXBMP(
+    64 - coffeeIconBitmapWidth / 2,
+    32 - coffeeIconBitmapHeight / 2,
+    coffeeIconBitmapWidth,
+    coffeeIconBitmapHeight,
+    coffeeIconBitmap
+  );
+  display.sendBuffer();
 }
 
 void showTaringScreen() {
   const char * message = "Taring...";
-  display.firstPage();
-  do {
-    display.setFont(SMALL_FONT);
-    unsigned short stringWidth = display.getStrWidth(message);
-    display.drawStr(64 - stringWidth / 2, 60, message);
-    display.drawXBMP(64 - scaleIconBitmapWidth / 2, 0, scaleIconBitmapWidth, scaleIconBitmapHeight, scaleIconBitmap);
-  } while (display.nextPage());
+  display.clearBuffer();
+  display.setFont(SMALL_FONT);
+  unsigned short stringWidth = display.getStrWidth(message);
+  display.drawStr(64 - stringWidth / 2, 60, message);
+  display.drawXBMP(64 - scaleIconBitmapWidth / 2, 0, scaleIconBitmapWidth, scaleIconBitmapHeight, scaleIconBitmap);
+  display.sendBuffer();
 }
 
 void showMainMenu() {
   currentScreen = MenuScreen;
 
-  display.firstPage();
-  do {
-    display.setFont(SMALL_FONT);
-    for (short i = 0; i < menuLength; i++) {
-      String selectionIndicator = *selectedItem == mainMenu[i] ? "> " : "  ";
-      String lineText = selectionIndicator + getMenuItemString(mainMenu[i]);
-      display.drawStr(0, 15 * (i + 1), lineText.c_str());
-    }
-  } while (display.nextPage());
+  display.clearBuffer();
+  display.setFont(SMALL_FONT);
+  for (short i = 0; i < menuLength; i++) {
+    String selectionIndicator = *selectedItem == mainMenu[i] ? "> " : "  ";
+    String lineText = selectionIndicator + getMenuItemString(mainMenu[i]);
+    display.drawStr(0, 15 * (i + 1), lineText.c_str());
+  }
+  display.sendBuffer();
 }
 
 void showPortafilterMenu() {
@@ -249,29 +245,27 @@ void showWeight(float loadCellWeight, const char *title) {
     loadCellWeight = 0;
   }
 
-  display.firstPage();
-  do {
-    display.setFont(SMALL_FONT);
-    display.drawStr(0, 15, title);
-    display.setFont(LARGE_FONT);
-    String weightString = String(loadCellWeight, 1);
-    unsigned short stringWidth = display.getStrWidth(weightString.c_str());
-    display.drawStr(64 - stringWidth / 2, 55, weightString.c_str());
-  } while (display.nextPage());
+  display.clearBuffer();
+  display.setFont(SMALL_FONT);
+  display.drawStr(0, 15, title);
+  display.setFont(LARGE_FONT);
+  String weightString = String(loadCellWeight, 1);
+  unsigned short stringWidth = display.getStrWidth(weightString.c_str());
+  display.drawStr(64 - stringWidth / 2, 55, weightString.c_str());
+  display.sendBuffer();
 }
 
 void showInfo() {
   currentScreen = InfoScreen;
   String shotMadeString = String(grindedDosesCount);
 
-  display.firstPage();
-  do {
-    display.setFont(SMALL_FONT);
-    display.drawStr(0, 15, (String("Shots: ") + String(grindedDosesCount)).c_str());
-    display.drawStr(0, 30, (String("Last time: ") + String(float(lastShotTime) / 1000, 1)).c_str());
-    display.drawStr(0, 45, (String("IP: ") + WiFi.localIP().toString()).c_str());
-    display.drawStr(0, 60, (String("Net: ") + WiFi.SSID()).c_str());
-  } while (display.nextPage());
+  display.clearBuffer();
+  display.setFont(SMALL_FONT);
+  display.drawStr(0, 15, (String("Shots: ") + String(grindedDosesCount)).c_str());
+  display.drawStr(0, 30, (String("Last time: ") + String(float(lastShotTime) / 1000, 1)).c_str());
+  display.drawStr(0, 45, (String("IP: ") + WiFi.localIP().toString()).c_str());
+  display.drawStr(0, 60, (String("Net: ") + WiFi.SSID()).c_str());
+  display.sendBuffer();
 }
 
 /*
