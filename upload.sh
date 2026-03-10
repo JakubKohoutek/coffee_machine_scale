@@ -13,7 +13,7 @@ set -e
 # the device resolved via mDNS (or directly by IP). Requires the HA Terminal
 # & SSH add-on.
 
-ARDUINO_CLI="/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli"
+ARDUINO_CLI="arduino-cli"
 FQBN="esp8266:esp8266:d1_mini"
 ESPOTA_PY=$(find ~/Library/Arduino15/packages/esp8266/hardware/esp8266/*/tools -name "espota.py" 2>/dev/null | head -1)
 

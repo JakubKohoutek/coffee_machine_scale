@@ -10,17 +10,14 @@ Arduino firmware for a built-in espresso scale for the Rancilio Silvia coffee ma
 
 This is an Arduino project. Use `arduino-cli` for compilation and upload:
 
-The `arduino-cli` binary is bundled inside the Arduino IDE app:
-```
-"/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli"
-```
+`arduino-cli` is available system-wide via a symlink (`/usr/local/bin/arduino-cli` → Arduino IDE bundled binary).
 
 ```bash
 # Compile
-"/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli" compile --fqbn esp8266:esp8266:d1_mini --libraries ~/Documents/Arduino/libraries coffee_machine_scale.ino
+arduino-cli compile --fqbn esp8266:esp8266:d1_mini --libraries ~/Documents/Arduino/libraries coffee_machine_scale.ino
 
 # Upload over the air (OTA) — device IP is the "port"
-"/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli" upload --fqbn esp8266:esp8266:d1_mini --port 10.0.1.28 coffee_machine_scale.ino
+arduino-cli upload --fqbn esp8266:esp8266:d1_mini --port 10.0.1.28 coffee_machine_scale.ino
 ```
 
 The board configuration string from `.vscode/arduino.json`:

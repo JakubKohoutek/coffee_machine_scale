@@ -26,16 +26,14 @@ Additional component housings in [housing_models/](./housing_models).
 
 ## Build & Upload
 
-Requires `arduino-cli` (bundled in Arduino IDE):
+Requires `arduino-cli` on PATH (symlinked from Arduino IDE bundled binary):
 
 ```bash
 # Compile
-"/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli" \
-  compile --fqbn esp8266:esp8266:d1_mini --libraries ~/Documents/Arduino/libraries coffee_machine_scale.ino
+arduino-cli compile --fqbn esp8266:esp8266:d1_mini --libraries ~/Documents/Arduino/libraries coffee_machine_scale.ino
 
 # Upload (OTA)
-"/Applications/Arduino IDE.app/Contents/Resources/app/lib/backend/resources/arduino-cli" \
-  upload --fqbn esp8266:esp8266:d1_mini --port <DEVICE_IP> coffee_machine_scale.ino
+arduino-cli upload --fqbn esp8266:esp8266:d1_mini --port <DEVICE_IP> coffee_machine_scale.ino
 ```
 
 WiFi and MQTT credentials go in `~/Documents/Arduino/libraries/credentials/credentials.h` — see `HOME_ASSISTANT_MQTT.md`.
