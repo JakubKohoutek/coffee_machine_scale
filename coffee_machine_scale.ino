@@ -1,6 +1,5 @@
 #include <ESP8266WiFi.h>
 #include <ESPAsyncWebServer.h>
-#include <WebSerial.h>
 #include <credentials.h>
 #include <JC_Button.h>
 #include <Arduino.h>
@@ -12,6 +11,9 @@
 #include "memory.h"
 #include "rotary_encoder.h"
 #include "icons.h"
+#include "log.h"
+#include "mqtt.h"
+#include "web.h"
 
 #define ENCODER_A       14   // Must be an interrupt pin for sufficient reliability
 #define ENCODER_B       12   // Must be an interrupt pin for sufficient reliability
@@ -19,6 +21,12 @@
 #define LONG_PRESS_MS   2000
 #define BUS_CLOCK_SPEED 400000
 #define RELAY_PIN       D8
+
+#define MY_TZ           "CET-1CEST,M3.5.0/02,M10.5.0/03"
+#define MY_NTP_SERVER   "pool.ntp.org"
+#define WIFI_CHECK_INTERVAL   10000
+#define RSSI_LOG_INTERVAL     600000
+#define MQTT_STATE_INTERVAL   30000
 
 #define SINGLE_DOSE_ADDRESS  0
 #define DOUBLE_DOSE_ADDRESS  4
@@ -28,6 +36,8 @@
 #define DOUBLE_NAKED_ADDRESS 20
 #define SINGLE_SPOUT_ADDRESS 24
 #define DOUBLE_SPOUT_ADDRESS 28
+// MAGIC_ADDRESS is 32 (defined in memory.cpp)
+#define CORRECTION_TIME_ADDRESS 36
 
 #define OLED         U8G2_SH1106_128X64_NONAME_F_HW_I2C
 #define SMALL_FONT   u8g2_font_8x13B_tf // XE font group
@@ -53,7 +63,7 @@ enum Screen {
   InfoScreen,
   ScaleScreen,
   PortafilterScreen,
-  WeightCoeffScreen
+  OvershootScreen
 };
 
 // HX711 pins definition
@@ -70,15 +80,16 @@ const long LOADCELL_2_DIVIDER = 1654;
 
 const char*    ssid                     = STASSID;
 const char*    password                 = STAPSK;
-const char*    deviceId                 = "Coffee machine scale";
+const char*    deviceId                 = "coffee-machine-scale";
 
 long           encoderPosition       = 0;
 unsigned long  singleShotLimit       = 0;
 unsigned long  doubleShotLimit       = 0;
-unsigned long  singleSpoutedCoeff    = 0;
-unsigned long  singleNakedCoeff      = 0;
-unsigned long  doubleSpoutedCoeff    = 0;
-unsigned long  doubleNakedCoeff      = 0;
+unsigned long  singleSpoutedOvershoot    = 0;
+unsigned long  singleNakedOvershoot      = 0;
+unsigned long  doubleSpoutedOvershoot    = 0;
+unsigned long  doubleNakedOvershoot      = 0;
+unsigned long  correctionTimeMs          = 1200;  // default 1.2s, stored in EEPROM as milliseconds
 unsigned long  grindedDosesCount     = 0;
 unsigned long  lastShotTime          = 0;
 unsigned long  lastActivityMillis    = 0;
@@ -91,6 +102,19 @@ Portafilter    selectedPortafilter   = Spouted;
 short          menuLength            = sizeof(mainMenu) / sizeof(*mainMenu);
 short          portafilterMenuLength = sizeof(portafilterMenu) / sizeof(*portafilterMenu);
 bool           ignoreNextPush        = false;
+unsigned long  lastWiFiCheck         = 0;
+unsigned long  lastRssiLog           = 0;
+unsigned long  lastMqttStatePublish  = 0;
+bool           wifiConnected        = false;
+
+// Shot profile storage (item 12)
+#define MAX_PROFILE_POINTS 300
+struct ProfilePoint {
+  unsigned long timeMs;
+  float weight;
+};
+ProfilePoint   shotProfile[MAX_PROFILE_POINTS];
+int            profilePointCount    = 0;
 
 AsyncWebServer server(80);
 OLED           display(U8G2_R0, U8X8_PIN_NONE);
@@ -111,12 +135,12 @@ const char *getMenuItemString(MenuItem menuItem) {
   }
 }
 
-unsigned long *getCoeffPtr() {
+unsigned long *getOvershootPtr() {
   if (*selectedItem == SingleDose) {
-    return selectedPortafilter == BottomLess ? &singleNakedCoeff : &singleSpoutedCoeff;
+    return selectedPortafilter == BottomLess ? &singleNakedOvershoot : &singleSpoutedOvershoot;
   }
   // else it is double dose
-  return selectedPortafilter == BottomLess ? &doubleNakedCoeff : &doubleSpoutedCoeff;
+  return selectedPortafilter == BottomLess ? &doubleNakedOvershoot : &doubleSpoutedOvershoot;
 }
 
 float getCurrentWeight() {
@@ -137,6 +161,7 @@ void showScale(const char *message) {
   while (true) {
     pushButton.read();
     if (pushButton.wasPressed()) {
+      lastActivityMillis = millis();
       break;
     }
 
@@ -158,11 +183,12 @@ void showScale(const char *message) {
 
     // We use this to prevent scale drifting
     if (abs(weightAverage) > 0.08 && abs(weightAverage) < 0.13 && canTare) {
-      WebSerial.print(String("Calibrating to prevent drifting, array: {"));
+      String driftLog = "Calibrating drift, array: {";
       for (int i = 0; i < weightArraySize; i++) {
-        WebSerial.print(String(weightArray[i]) + String(i == weightArraySize - 1 ? "} " : ", "));
+        driftLog += String(weightArray[i]) + String(i == weightArraySize - 1 ? "} " : ", ");
       }
-      WebSerial.println(String("Average: ") + String(weightAverage, 2));
+      driftLog += "Average: " + String(weightAverage, 2);
+      logMessage(driftLog);
 
       driftCoefficient -= weightAverage;
       weightAverage = 0;
@@ -255,6 +281,49 @@ void showWeight(float loadCellWeight, const char *title) {
   display.sendBuffer();
 }
 
+void showExtractionWeight(float weight, float timeSec, float targetWeight) {
+  if (abs(weight) < 0.1) weight = 0;
+
+  display.clearBuffer();
+
+  // Title: "12.3s / 36.0g"
+  display.setFont(SMALL_FONT);
+  String title = String(timeSec, 1) + "s / " + String(targetWeight, 1) + "g";
+  unsigned short titleWidth = display.getStrWidth(title.c_str());
+  display.drawStr(64 - titleWidth / 2, 13, title.c_str());
+
+  // Current weight, large
+  display.setFont(LARGE_FONT);
+  String weightString = String(weight, 1);
+  unsigned short stringWidth = display.getStrWidth(weightString.c_str());
+  display.drawStr(64 - stringWidth / 2, 50, weightString.c_str());
+
+  // Progress bar at bottom (4px tall)
+  float progress = targetWeight > 0 ? weight / targetWeight : 0;
+  if (progress > 1.0f) progress = 1.0f;
+  if (progress < 0) progress = 0;
+  int barWidth = (int)(progress * 128);
+  display.drawBox(0, 60, barWidth, 4);
+
+  display.sendBuffer();
+}
+
+void saveProfile() {
+  File f = LittleFS.open("/last_shot.json", "w");
+  if (!f) return;
+  f.print("[");
+  for (int i = 0; i < profilePointCount; i++) {
+    if (i > 0) f.print(",");
+    f.print("{\"t\":");
+    f.print(shotProfile[i].timeMs);
+    f.print(",\"w\":");
+    f.print(String(shotProfile[i].weight, 1));
+    f.print("}");
+  }
+  f.print("]");
+  f.close();
+}
+
 void showInfo() {
   currentScreen = InfoScreen;
   String shotMadeString = String(grindedDosesCount);
@@ -276,39 +345,120 @@ void turnOnWiFi() {
   WiFi.mode(WIFI_STA);
   WiFi.begin(ssid, password);
   Serial.print("\nConnecting");
-  while (WiFi.status() != WL_CONNECTED) {
+  unsigned long wifiStart = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - wifiStart < 15000) {
     Serial.print(".");
     delay(500);
   }
-  Serial.println("\nConnected. IP address:");
-  Serial.println(WiFi.localIP());
+  if (WiFi.status() == WL_CONNECTED) {
+    wifiConnected = true;
+    Serial.println("\nConnected. IP address:");
+    Serial.println(WiFi.localIP());
+  } else {
+    wifiConnected = false;
+    Serial.println("\nWiFi connection timed out, continuing offline");
+  }
 }
 
-void handleWebSerialMessage(uint8_t *data, size_t len) {
-  // Process message into command:value pair
+void handleWiFi() {
+  unsigned long now = millis();
+
+  if (now - lastWiFiCheck < WIFI_CHECK_INTERVAL) return;
+  lastWiFiCheck = now;
+
+  if (WiFi.status() != WL_CONNECTED) {
+    logMessage("[WIFI] Connection lost, reconnecting...");
+    WiFi.disconnect();
+    WiFi.begin(ssid, password);
+    unsigned long start = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - start < 10000) {
+      delay(250);
+    }
+    if (WiFi.status() == WL_CONNECTED) {
+      logMessage("[WIFI] Reconnected. IP: " + WiFi.localIP().toString());
+    } else {
+      Serial.println("[WIFI] Reconnection failed, will retry");
+    }
+    return;
+  }
+
+  if (now - lastRssiLog >= RSSI_LOG_INTERVAL) {
+    lastRssiLog = now;
+    int rssi = WiFi.RSSI();
+    const char* quality = rssi >= -50 ? "Excellent" : rssi >= -60 ? "Good" : rssi >= -70 ? "Fair" : rssi >= -80 ? "Weak" : "Poor";
+    logMessage(String("[WIFI] RSSI: ") + rssi + " dBm (" + quality + ")");
+  }
+}
+
+void handleCommand(const String& cmd) {
   String command = "";
   String value = "";
-  boolean beforeColon = true;
-  for (int i = 0; i < len; i++) {
-    if (char(data[i]) == ':') {
-      beforeColon = false;
-    } else if (beforeColon) {
-      command += char(data[i]);
-    } else {
-      value += char(data[i]);
+  int colonIndex = cmd.indexOf(':');
+  if (colonIndex > 0) {
+    command = cmd.substring(0, colonIndex);
+    value = cmd.substring(colonIndex + 1);
+  } else {
+    command = cmd;
+  }
+
+  unsigned long val = value.toInt();
+
+  // Validate: reject non-numeric input and unreasonable values (>200g)
+  if (colonIndex > 0) {
+    if (val == 0 && value != "0") {
+      logMessage("[CMD] Invalid value (non-numeric): " + value);
+      return;
+    }
+    if (val > 200000) {
+      logMessage("[CMD] Value too large (>200g): " + value);
+      return;
     }
   }
 
-  if (command.equals("help")) {
-    WebSerial.println((
-                        String("Available commands:\n") + "getInfo\n"
-                                                          "help\n")
-                        .c_str());
-  } else if (command.equals("getInfo")) {
-    WebSerial.println(String("Total weight: ") + String("N/A"));
+  if (command == "setSingleDose") {
+    singleShotLimit = val;
+    writeToMemory(SINGLE_DOSE_ADDRESS, singleShotLimit);
+    logMessage("[CMD] singleShotLimit = " + String(singleShotLimit));
+  } else if (command == "setDoubleDose") {
+    doubleShotLimit = val;
+    writeToMemory(DOUBLE_DOSE_ADDRESS, doubleShotLimit);
+    logMessage("[CMD] doubleShotLimit = " + String(doubleShotLimit));
+  } else if (command == "setSingleNaked") {
+    singleNakedOvershoot = val;
+    writeToMemory(SINGLE_NAKED_ADDRESS, singleNakedOvershoot);
+    logMessage("[CMD] singleNakedOvershoot = " + String(singleNakedOvershoot));
+  } else if (command == "setSingleSpouted") {
+    singleSpoutedOvershoot = val;
+    writeToMemory(SINGLE_SPOUT_ADDRESS, singleSpoutedOvershoot);
+    logMessage("[CMD] singleSpoutedOvershoot = " + String(singleSpoutedOvershoot));
+  } else if (command == "setDoubleNaked") {
+    doubleNakedOvershoot = val;
+    writeToMemory(DOUBLE_NAKED_ADDRESS, doubleNakedOvershoot);
+    logMessage("[CMD] doubleNakedOvershoot = " + String(doubleNakedOvershoot));
+  } else if (command == "setDoubleSpouted") {
+    doubleSpoutedOvershoot = val;
+    writeToMemory(DOUBLE_SPOUT_ADDRESS, doubleSpoutedOvershoot);
+    logMessage("[CMD] doubleSpoutedOvershoot = " + String(doubleSpoutedOvershoot));
+  } else if (command == "setCorrectionTime") {
+    correctionTimeMs = val;
+    writeToMemory(CORRECTION_TIME_ADDRESS, correctionTimeMs);
+    logMessage("[CMD] correctionTimeMs = " + String(correctionTimeMs));
   } else {
-    WebSerial.println(String("Unknown command '") + command + "' with value '" + value + "'" + value);
+    logMessage("[CMD] Unknown command: " + cmd);
   }
+}
+
+void publishAllStates() {
+  mqttPublishState("singleDose", String(singleShotLimit).c_str());
+  mqttPublishState("doubleDose", String(doubleShotLimit).c_str());
+  mqttPublishState("singleNakedOvershoot", String(singleNakedOvershoot).c_str());
+  mqttPublishState("singleSpoutedOvershoot", String(singleSpoutedOvershoot).c_str());
+  mqttPublishState("doubleNakedOvershoot", String(doubleNakedOvershoot).c_str());
+  mqttPublishState("doubleSpoutedOvershoot", String(doubleSpoutedOvershoot).c_str());
+  mqttPublishState("shotCount", String(grindedDosesCount).c_str());
+  mqttPublishState("lastShotTime", String(lastShotTime).c_str());
+  mqttPublishState("sleep", sleepModeActive ? "true" : "false");
+  mqttPublish(MQTT_AVAILABLE_TOPIC, "online", true);
 }
 
 void changeTargetWeight(unsigned long *targetWeightPtr, bool up, const char *title) {
@@ -320,7 +470,7 @@ void changeTargetWeight(unsigned long *targetWeightPtr, bool up, const char *tit
   showGramsWithTitle(*targetWeightPtr, title);
 }
 
-void changeWeightCoefficient(unsigned long *weightCoeffPtr, bool up, const char *title) {
+void changeOvershoot(unsigned long *weightCoeffPtr, bool up, const char *title) {
   if (up) {
     *weightCoeffPtr += 100;
   } else if (*weightCoeffPtr >= 100) {
@@ -329,8 +479,8 @@ void changeWeightCoefficient(unsigned long *weightCoeffPtr, bool up, const char 
   showGramsWithTitle(*weightCoeffPtr, title);
 }
 
-void writeWeightCoefficientToMemory() {
-  unsigned long newWeightCoefficient = *getCoeffPtr();
+void writeOvershootToMemory() {
+  unsigned long newWeightCoefficient = *getOvershootPtr();
   if (*selectedItem == SingleDose && selectedPortafilter == BottomLess) {
     writeToMemory(SINGLE_NAKED_ADDRESS, newWeightCoefficient);
   }
@@ -392,9 +542,9 @@ void handleRotation(bool clockwise) {
         showPortafilterMenu();
         break;
       }
-    case WeightCoeffScreen:
-      changeWeightCoefficient(
-        getCoeffPtr(),
+    case OvershootScreen:
+      changeOvershoot(
+        getOvershootPtr(),
         clockwise,
         selectedPortafilter == BottomLess ? "Bottomless" : "Spouted");
       break;
@@ -425,6 +575,7 @@ void handleButtonPush() {
           showScale("Weight (g):");
           break;
         }
+        break;
       }
     case PortafilterScreen:
       {
@@ -449,9 +600,9 @@ void handleButtonPush() {
         showMainMenu();
         break;
       }
-    case WeightCoeffScreen:
+    case OvershootScreen:
       {
-        writeWeightCoefficientToMemory();
+        writeOvershootToMemory();
         showPortafilterMenu();
         break;
       }
@@ -480,8 +631,8 @@ void handleLongButtonPush() {
         if (selectedPortafilter == Back) {
           return;
         }
-        currentScreen = WeightCoeffScreen;
-        unsigned long * weightCoeffPtr = getCoeffPtr();
+        currentScreen = OvershootScreen;
+        unsigned long * weightCoeffPtr = getOvershootPtr();
         showGramsWithTitle(*weightCoeffPtr, selectedPortafilter == BottomLess ? "Bottomless" : "Spouted");
         break;
       }
@@ -491,18 +642,37 @@ void handleLongButtonPush() {
   ignoreNextPush = true;
 }
 
+float medianOfFive(float a[], int n) {
+  float tmp[5];
+  for (int i = 0; i < n; i++) tmp[i] = a[i];
+  // Simple insertion sort (n <= 5)
+  for (int i = 1; i < n; i++) {
+    float key = tmp[i];
+    int j = i - 1;
+    while (j >= 0 && tmp[j] > key) { tmp[j + 1] = tmp[j]; j--; }
+    tmp[j + 1] = key;
+  }
+  return tmp[n / 2];
+}
+
 void startExtraction() {
   currentScreen = Timer;
 
   float timePassed = 0.0f;
-  float timeLimit = 60.0f;  // Pump shouldn't run more than 60 senconds without rest
+  float timeLimit = 60.0f;  // Pump shouldn't run more than 60 seconds without rest
   bool stopped = false;
   float currentWeight = 0.0f;
-  float weightOfCoffeeExtractedAfterStop = *getCoeffPtr() / 1000;
-  float weightLimit = *selectedItem == SingleDose ? singleShotLimit / 1000 : doubleShotLimit / 1000;
-  const int weightArraySize = 5;  // Size of the array
+  float overshoot = *getOvershootPtr() / 1000.0f;
+  float weightLimit = *selectedItem == SingleDose ? singleShotLimit / 1000.0f : doubleShotLimit / 1000.0f;
+  const int weightArraySize = 5;
   float weightArray[weightArraySize] = { 0.0f };
   int numberOfReadings = 0;
+  float finalWeight = 0.0f;
+  const char* doseType = *selectedItem == SingleDose ? "single" : "double";
+
+  // Reset shot profile
+  profilePointCount = 0;
+  unsigned long lastProfileCapture = 0;
 
   showTaringScreen();
   loadcellA.tare();
@@ -513,27 +683,20 @@ void startExtraction() {
   // level of fault in the measurement once the pump is turned on. This variable helps to correct that
   float correctionWeight = 0.0f;
   bool correctionApplied = false;
-  float timeOfCorrection = 1.2f; // TODO: move this to EEPROM and make it configurable
+  float timeOfCorrection = correctionTimeMs / 1000.0f;
 
-  File file = LittleFS.open("/index.html", "w");
-  if (!file) {
-    WebSerial.println("Failed to open /index.html for writing");
-    return;
-  }
-
-  file.println("<!DOCTYPE html><html><head><title>Last extraction data</title></head>");
-  file.println("<body>");
-  file.println("<p>Time and weight array:</p><p>[");
+  logMessage("[EXTRACTION] Starting, target: " + String(weightLimit, 1) + "g, overshoot: " + String(overshoot, 1) + "g");
+  mqttPublishEvent("extraction_started");
 
   digitalWrite(RELAY_PIN, HIGH);
 
   while (true) {
+    ESP.wdtFeed();
+
     // Stop the extraction if the button is pushed
     pushButton.read();
     if (pushButton.wasReleased()) {
       stopped = true;
-      file.println("]<p>");
-      file.println("<p>Finished, stopped manually</p>");
       break;
     }
 
@@ -541,21 +704,25 @@ void startExtraction() {
     timePassed = (float)(millis() - startTime) / 1000;
     if (timePassed > timeLimit) {
       stopped = true;
-      file.println("]<p>");
-      file.println("<p>Finished, time limit exceeded</p>");
       break;
     }
 
     // Get the current sensor reading
     currentWeight = getCurrentWeight();
 
-    // Log the data into the file for debugging purposes
-    file.println(String("[") + timePassed + ", " + currentWeight + "],");
-
-    // Vibrations and voltage drop if the relay is switched on can cause incorrect weight readings 
+    // Vibrations and voltage drop if the relay is switched on can cause incorrect weight readings
     // at the beginning of extraction. Ignore the readings before the tray, cups and other things settle in place.
     if (timePassed < timeOfCorrection) {
-      showWeight(0, (String("Pouring: ") + String(timePassed, 1) + "s").c_str());
+      // Capture zero-weight profile points so the chart shows the initial flat period
+      unsigned long now = millis();
+      if (now - lastProfileCapture >= 200 && profilePointCount < MAX_PROFILE_POINTS) {
+        shotProfile[profilePointCount].timeMs = now - startTime;
+        shotProfile[profilePointCount].weight = 0;
+        profilePointCount++;
+        lastProfileCapture = now;
+      }
+      showExtractionWeight(0, timePassed, weightLimit);
+      yield();
       continue;
     }
 
@@ -565,9 +732,7 @@ void startExtraction() {
       correctionWeight = currentWeight;
     }
 
-
-    // Calculate the floating average of the extracted coffee weight
-    float weightArraySum = 0.0f;
+    // Calculate the median of recent weight readings (rejects vibration spikes with less lag than averaging)
     numberOfReadings = numberOfReadings >= weightArraySize ? weightArraySize : numberOfReadings + 1;
     for (int i = numberOfReadings - 1; i >= 0; i--) {
       if (i > 0) {
@@ -575,49 +740,121 @@ void startExtraction() {
       } else {
         weightArray[i] = currentWeight;
       }
-      weightArraySum += weightArray[i];
     }
 
-    float averageWeight = weightArraySum / numberOfReadings;
-    float correctedAverageWeight = averageWeight - correctionWeight;
-    // If the corrected average weight is negative, zero it out to the current level
-    if (correctedAverageWeight < 0.0f) {
-      correctionWeight = averageWeight;
-      correctedAverageWeight = 0;
+    float medianWeight = medianOfFive(weightArray, numberOfReadings);
+    float correctedWeight = medianWeight - correctionWeight;
+    // If the corrected weight is negative, zero it out to the current level
+    if (correctedWeight < 0.0f) {
+      correctionWeight = medianWeight;
+      correctedWeight = 0;
     }
 
-    // Finally, stop the extraction once we reach the target weight minus the weight of coffee
-    // that is still poured after the extraction stops (configurable in settings)
-    if (correctedAverageWeight > weightLimit - weightOfCoffeeExtractedAfterStop) {
-      file.println("]<p>");
-      file.println(String("<p>Finished, correctedAverageWeight: ") + correctedAverageWeight + ", correctionWeight: " + correctionWeight + "</p>");
+    finalWeight = correctedWeight;
+
+    // Capture profile data every 200ms
+    unsigned long now = millis();
+    if (now - lastProfileCapture >= 200 && profilePointCount < MAX_PROFILE_POINTS) {
+      shotProfile[profilePointCount].timeMs = now - startTime;
+      shotProfile[profilePointCount].weight = correctedWeight;
+      profilePointCount++;
+      lastProfileCapture = now;
+    }
+
+    // Stop the extraction once we reach the target weight minus overshoot
+    if (correctedWeight > weightLimit - overshoot) {
       break;
     }
 
-    // Show the current weight of extracted coffee or zero until we get the weight correction
-    showWeight(correctionApplied ? correctedAverageWeight : 0, (String("Pouring: ") + String(timePassed, 1) + "s").c_str());
+    // Show the current weight with progress bar and target
+    showExtractionWeight(correctionApplied ? correctedWeight : 0, timePassed, weightLimit);
 
-    // Allow module to execute necessary system operations in order to prevent
-    // unintended rebboting.
     yield();
   }
 
-  file.println("</body></html>");
-  file.close();
-  WebSerial.println("HTML content written to /index.html");
-
   digitalWrite(RELAY_PIN, LOW);
-  lastShotTime = int(timePassed * 1000);
-  writeToMemory(LAST_TIME_ADDRESS, lastShotTime);
 
+  // Compute title and stats before settling so the display is consistent throughout
+  const char* stopReason;
   if (stopped) {
-    showScale((String("Stopped at ") + String(timePassed, 1) + "s").c_str());
+    stopReason = "manual";
   } else {
     writeToMemory(
       STATISTICS_ADDRESS,
       grindedDosesCount += (*selectedItem == SingleDose ? 1 : 2));
-    showScale((String("Done at ") + String(timePassed, 1) + "s").c_str());
+    stopReason = "target_reached";
   }
+
+  // Wait 3 seconds after pump stops for remaining liquid to flow into cup.
+  // Show the result screen (same layout as final) so there's no visual jump.
+  // Button press skips the wait.
+  unsigned long settleStart = millis();
+  while (millis() - settleStart < 3000) {
+    ESP.wdtFeed();
+    pushButton.read();
+    if (pushButton.wasReleased()) {
+      break;
+    }
+
+    currentWeight = getCurrentWeight();
+
+    // Continue updating the median filter during settling
+    for (int i = weightArraySize - 1; i >= 0; i--) {
+      if (i > 0) {
+        weightArray[i] = weightArray[i - 1];
+      } else {
+        weightArray[i] = currentWeight;
+      }
+    }
+    float medianWeight = medianOfFive(weightArray, weightArraySize);
+    float correctedWeight = medianWeight - correctionWeight;
+    if (correctedWeight < 0.0f) {
+      correctionWeight = medianWeight;
+      correctedWeight = 0;
+    }
+    finalWeight = correctedWeight;
+
+    // Continue capturing profile during settling
+    unsigned long now = millis();
+    if (now - lastProfileCapture >= 200 && profilePointCount < MAX_PROFILE_POINTS) {
+      shotProfile[profilePointCount].timeMs = now - startTime;
+      shotProfile[profilePointCount].weight = correctedWeight;
+      profilePointCount++;
+      lastProfileCapture = now;
+    }
+
+    timePassed = (float)(millis() - startTime) / 1000;
+    String settleTitle = stopped
+      ? String("Stopped at ") + String(timePassed, 1) + "s"
+      : String("Done at ") + String(timePassed, 1) + "s";
+    showWeight(finalWeight, settleTitle.c_str());
+    yield();
+  }
+
+  timePassed = (float)(millis() - startTime) / 1000;
+  lastShotTime = int(timePassed * 1000);
+  writeToMemory(LAST_TIME_ADDRESS, lastShotTime);
+
+  String title = stopped
+    ? String("Stopped at ") + String(timePassed, 1) + "s"
+    : String("Done at ") + String(timePassed, 1) + "s";
+
+  logMessage(String("[EXTRACTION] ") + title + ", weight: " + String(finalWeight, 1) + "g");
+  mqttPublishEventJson(stopped ? "extraction_stopped" : "extraction_complete",
+                       finalWeight, timePassed, doseType, stopReason);
+
+  // Save shot profile to LittleFS
+  saveProfile();
+
+  // Show locked final weight until button release
+  showWeight(finalWeight, title.c_str());
+  while (true) {
+    pushButton.read();
+    if (pushButton.wasReleased()) break;
+    yield();
+  }
+  lastActivityMillis = millis();
+  showMainMenu();
 }
 
 bool goToSleepMode () {
@@ -650,6 +887,9 @@ void setup() {
   digitalWrite(D4, LOW);
   Serial.begin(115200);
 
+  // Enable hardware watchdog for extraction safety
+  ESP.wdtEnable(8000);
+
   // Initiate rotary encoder
   pinMode(ENCODER_BUTTON, INPUT_PULLUP);
   initRotaryEncoder(ENCODER_A, ENCODER_B);
@@ -668,55 +908,103 @@ void setup() {
   display.setBusClock(BUS_CLOCK_SPEED);
   showWelcomeScreen();
 
-  // Start WiFi
+  // Start WiFi and NTP
   turnOnWiFi();
+  configTime(MY_TZ, MY_NTP_SERVER);
+
+  // Start the file system and logging
+  initiateLog();
 
   // Inititate eeprom and load variables from persistent memory
   initiateMemory();
-  singleShotLimit = readFromMemory(SINGLE_DOSE_ADDRESS);     // writeToMemory(SINGLE_DOSE_ADDRESS, 0);
-  doubleShotLimit = readFromMemory(DOUBLE_DOSE_ADDRESS);     // writeToMemory(DOUBLE_DOSE_ADDRESS, 0);
-  grindedDosesCount = readFromMemory(STATISTICS_ADDRESS);    // writeToMemory(STATISTICS_ADDRESS, 0);
-  lastShotTime = readFromMemory(LAST_TIME_ADDRESS);          // writeToMemory(LAST_TIME_ADDRESS, 0);
-  singleSpoutedCoeff = readFromMemory(SINGLE_SPOUT_ADDRESS); // writeToMemory(SINGLE_SPOUT_ADDRESS, 0);
-  singleNakedCoeff   = readFromMemory(SINGLE_NAKED_ADDRESS); // writeToMemory(SINGLE_NAKED_ADDRESS, 0);
-  doubleSpoutedCoeff = readFromMemory(DOUBLE_SPOUT_ADDRESS); // writeToMemory(DOUBLE_SPOUT_ADDRESS, 0);
-  doubleNakedCoeff   = readFromMemory(DOUBLE_NAKED_ADDRESS); // writeToMemory(DOUBLE_NAKED_ADDRESS, 0);
+  singleShotLimit    = readFromMemory(SINGLE_DOSE_ADDRESS);
+  doubleShotLimit    = readFromMemory(DOUBLE_DOSE_ADDRESS);
+  grindedDosesCount  = readFromMemory(STATISTICS_ADDRESS);
+  lastShotTime       = readFromMemory(LAST_TIME_ADDRESS);
+  singleSpoutedOvershoot = readFromMemory(SINGLE_SPOUT_ADDRESS);
+  singleNakedOvershoot   = readFromMemory(SINGLE_NAKED_ADDRESS);
+  doubleSpoutedOvershoot = readFromMemory(DOUBLE_SPOUT_ADDRESS);
+  doubleNakedOvershoot   = readFromMemory(DOUBLE_NAKED_ADDRESS);
+  correctionTimeMs       = readFromMemory(CORRECTION_TIME_ADDRESS);
+  // Existing devices have uninitialized data at this address — use default if out of range
+  if (correctionTimeMs == 0 || correctionTimeMs > 10000) {
+    correctionTimeMs = 1200;
+    writeToMemory(CORRECTION_TIME_ADDRESS, correctionTimeMs);
+  }
 
   // Initiate over the air programming
   OTA::initialize(deviceId);
 
-  // Initiate WebSerial. It is accessible at "<IP Address>/webserial" in browser
-  WebSerial.begin(&server);
-  WebSerial.msgCallback(handleWebSerialMessage);
+  // Initiate MQTT
+  initiateMqtt();
 
-  // Set up the html server
+  // Web interface
   server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
-    request->send(LittleFS, "/index.html", "text/html");
+    request->send_P(200, "text/html", INDEX_HTML);
   });
 
-  server.on("/index.html", HTTP_GET, [](AsyncWebServerRequest *request) {
-    request->send(LittleFS, "/index.html", "text/html");
+  server.on("/api/status", HTTP_GET, [](AsyncWebServerRequest *request) {
+    String json = "{";
+    json += "\"singleDose\":" + String(singleShotLimit) + ",";
+    json += "\"doubleDose\":" + String(doubleShotLimit) + ",";
+    json += "\"singleNaked\":" + String(singleNakedOvershoot) + ",";
+    json += "\"singleSpouted\":" + String(singleSpoutedOvershoot) + ",";
+    json += "\"doubleNaked\":" + String(doubleNakedOvershoot) + ",";
+    json += "\"doubleSpouted\":" + String(doubleSpoutedOvershoot) + ",";
+    json += "\"shotCount\":" + String(grindedDosesCount) + ",";
+    json += "\"lastShotTime\":" + String(lastShotTime) + ",";
+    json += "\"sleep\":" + String(sleepModeActive ? "true" : "false") + ",";
+    json += "\"correctionTime\":" + String(correctionTimeMs) + ",";
+    json += "\"ip\":\"" + WiFi.localIP().toString() + "\"";
+    json += "}";
+    request->send(200, "application/json", json);
   });
 
-  server.onRequestBody([](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
-    // Handle any other body request here...
+  server.on("/api/send", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (request->hasParam("cmd")) {
+      String cmd = request->getParam("cmd")->value();
+      handleCommand(cmd);
+      request->send(200, "text/plain", "OK: " + cmd);
+    } else {
+      request->send(400, "text/plain", "Missing cmd parameter");
+    }
+  });
+
+  server.on("/log", HTTP_GET, [](AsyncWebServerRequest *request) {
+    request->send(LittleFS, logFilePath, "text/plain");
+  });
+
+  server.on("/api/profile", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (LittleFS.exists("/last_shot.json")) {
+      request->send(LittleFS, "/last_shot.json", "application/json");
+    } else {
+      request->send(200, "application/json", "[]");
+    }
   });
 
   server.onNotFound([](AsyncWebServerRequest *request) {
-    request->send(404, "text/plain", "The coffee machine scale says: sorry, not found.");
+    request->send(404, "text/plain", "Not found. Try / for web UI.");
   });
 
   // Start the server
   server.begin();
 
-  // Start the file system
-  LittleFS.begin();
-
   showMainMenu();
+
+  publishAllStates();
+  logMessage("[MAIN] Setup complete. IP: " + WiFi.localIP().toString());
 }
 
 void loop() {
   OTA::handle();
+  handleWiFi();
+  handleMqtt();
+
+  unsigned long now = millis();
+  if (now - lastMqttStatePublish >= MQTT_STATE_INTERVAL) {
+    lastMqttStatePublish = now;
+    publishAllStates();
+  }
 
   // Process change in the rotary encoder position
   long newPosition = readRotaryEncoder();
