@@ -3,8 +3,8 @@
 
 #include "rotary_encoder.h"
 
-volatile byte rotaryEncodarAFlag    = 0;
-volatile byte rotaryEncodarBFlag    = 0;
+volatile byte rotaryEncoderAFlag    = 0;
+volatile byte rotaryEncoderBFlag    = 0;
 long          rotaryEncoderPosition = 0;
 uint8_t       rotaryEncoderPinA     = 0;
 uint8_t       rotaryEncoderPinB     = 0;
@@ -14,12 +14,12 @@ void handlePinAChange(){
   noInterrupts();
   byte pinA = digitalRead(rotaryEncoderPinA);
   byte pinB = digitalRead(rotaryEncoderPinB);
-  if(pinA == HIGH && pinB == HIGH && rotaryEncodarAFlag) {
+  if(pinA == HIGH && pinB == HIGH && rotaryEncoderAFlag) {
     rotaryEncoderPosition -= 1;
-    rotaryEncodarBFlag = 0;
-    rotaryEncodarAFlag = 0;
+    rotaryEncoderBFlag = 0;
+    rotaryEncoderAFlag = 0;
   }
-  else if (pinA == HIGH) rotaryEncodarBFlag = 1;
+  else if (pinA == HIGH) rotaryEncoderBFlag = 1;
   interrupts();
 }
 
@@ -28,12 +28,12 @@ void handlePinBChange(){
   noInterrupts();
   byte pinA = digitalRead(rotaryEncoderPinA);
   byte pinB = digitalRead(rotaryEncoderPinB);
-  if (pinA == HIGH && pinB == HIGH && rotaryEncodarBFlag) {
+  if (pinA == HIGH && pinB == HIGH && rotaryEncoderBFlag) {
     rotaryEncoderPosition += 1;
-    rotaryEncodarBFlag = 0;
-    rotaryEncodarAFlag = 0;
+    rotaryEncoderBFlag = 0;
+    rotaryEncoderAFlag = 0;
   }
-  else if (pinB == HIGH) rotaryEncodarAFlag = 1;
+  else if (pinB == HIGH) rotaryEncoderAFlag = 1;
   interrupts();
 }
 
