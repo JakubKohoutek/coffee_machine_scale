@@ -17,7 +17,7 @@ This is an Arduino project. Use `arduino-cli` for compilation and upload:
 arduino-cli compile --fqbn esp8266:esp8266:d1_mini --libraries ~/Documents/Arduino/libraries coffee_machine_scale.ino
 
 # Upload over the air (OTA) — device IP is the "port"
-arduino-cli upload --fqbn esp8266:esp8266:d1_mini --port 10.0.1.28 coffee_machine_scale.ino
+arduino-cli upload --fqbn esp8266:esp8266:d1_mini --port 192.168.68.71 coffee_machine_scale.ino
 ```
 
 The board configuration string from `.vscode/arduino.json`:
@@ -39,8 +39,8 @@ The board configuration string from `.vscode/arduino.json`:
 - **`memory.h/.cpp`** — EEPROM persistence using a union-based byte serialization for `unsigned long` values. Addresses are defined as `#define` constants in the main sketch.
 - **`rotary_encoder.h/.cpp`** — Interrupt-driven rotary encoder reading.
 - **`ota.h/.cpp`** — ArduinoOTA wrapper for over-the-air firmware updates.
-- **`log.h/.cpp`** — Timestamped logging to LittleFS `/log.txt` (100KB max, auto-truncation) + Serial. Viewable at `http://<IP>/log`.
-- **`mqtt.h/.cpp`** — MQTT client under `coffee_scale/` topic tree. Auto-reconnect, LWT, state/event publishing, command subscription.
+- **`log.h/.cpp`** — Wall-time and uptime logging to LittleFS `/log.txt` + Serial. Rotates at 100KB by rename to `/log_previous.txt`; available at `/log` and `/log/previous`. Does not auto-format after mount failure.
+- **`mqtt.h/.cpp`** — AsyncMqttClient under `coffee_scale/` topic tree. Nonblocking connect/retry, LWT, state/event publishing, command subscription. TCP callbacks only queue commands/events; main-loop processing performs logging and settings writes.
 - **`web.h`** — PROGMEM HTML/CSS/JS for the web settings interface.
 - **`icons.h`** — XBM bitmap data for OLED icons.
 
@@ -51,6 +51,8 @@ The UI is driven by a `Screen` enum with these states: `MenuScreen`, `SettingsSc
 ### Extraction Flow
 
 `startExtraction()` is the core routine: it tares the load cells, turns on the relay (pump), reads weight through a 5-element median filter (rejects vibration spikes with less lag than averaging), applies a correction for initial vibration (after `timeOfCorrection` seconds), and stops when `correctedWeight > weightLimit - overshoot`. After pump stops, waits 3 seconds for liquid to settle (skippable via button), then locks the final weight on the OLED display until the user presses the button. Shot profile (weight over time) is captured every 200ms and saved to LittleFS.
+
+`handleBackground()` services WiFi, MQTT, OTA, and health diagnostics from the main loop (after physical input) and the locked result screen, but not inside pump/settling loops. WiFi startup and retries never wait for association; OTA initializes after the first connection. Logs include boot/reset details, WiFi disconnect reason codes, MQTT timings, and rate-limited slow-operation reports.
 
 ### Persistent Settings (EEPROM)
 
@@ -68,6 +70,7 @@ All values are stored as `unsigned long` at fixed addresses (weights in milligra
 - **`GET /api/send?cmd=<command>`** — set values (e.g., `setSingleDose:36000`), with input validation
 - **`GET /api/profile`** — JSON array of last shot profile (`[{"t":ms,"w":grams},...]`)
 - **`GET /log`** — view log file
+- **`GET /log/previous`** — previous rotated log file
 - Device auto-sleeps after 5 minutes of inactivity (display power save)
 
 ### MQTT
@@ -76,4 +79,4 @@ Topics under `coffee_scale/`: `available`, `singleDose`, `doubleDose`, `singleNa
 
 ## Libraries
 
-ESP8266WiFi, ESPAsyncWebServer, PubSubClient, JC_Button, U8g2, HX711, LittleFS, ArduinoOTA, EEPROM
+ESP8266WiFi, ESPAsyncWebServer, ESPAsyncTCP, AsyncMqttClient (0.9.0), JC_Button, U8g2, HX711, LittleFS, ArduinoOTA, EEPROM

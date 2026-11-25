@@ -3,6 +3,14 @@
 #ifndef ICONS_H
 #define ICONS_H
 
+const unsigned short wifiIconBitmapWidth = 13;
+const unsigned short wifiIconBitmapHeight = 11;
+const unsigned char wifiIconBitmap[] PROGMEM = {
+  0xf8, 0x03, 0x06, 0x0c, 0x01, 0x10, 0xf0, 0x01,
+  0x08, 0x02, 0x04, 0x04, 0xe0, 0x00, 0x10, 0x01,
+  0x00, 0x00, 0x40, 0x00, 0xe0, 0x00
+};
+
 const unsigned short coffeeIconBitmapWidth = 51;
 const unsigned short coffeeIconBitmapHeight = 66;
 const unsigned char coffeeIconBitmap [] PROGMEM = {

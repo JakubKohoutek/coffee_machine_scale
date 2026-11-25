@@ -2,7 +2,7 @@
 #define MQTT_H
 
 #include <ESP8266WiFi.h>
-#include <PubSubClient.h>
+#include <AsyncMqttClient.h>
 
 #define MQTT_BASE_TOPIC       "coffee_scale"
 #define MQTT_CMD_TOPIC        MQTT_BASE_TOPIC "/command"
@@ -10,7 +10,7 @@
 #define MQTT_AVAILABLE_TOPIC  MQTT_BASE_TOPIC "/available"
 #define MQTT_EVENT_TOPIC      MQTT_BASE_TOPIC "/event"
 
-extern PubSubClient mqttClient;
+extern AsyncMqttClient mqttClient;
 
 void initiateMqtt();
 void handleMqtt();

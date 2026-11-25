@@ -4,12 +4,18 @@
 #include "log.h"
 
 const char* logFilePath = "/log.txt";
-const char* logTempPath = "/log_tmp.txt";
+const char* previousLogFilePath = "/log_previous.txt";
 const size_t maxLogFileSize = 1024 * 100; // 100KB max log size
-const size_t truncateTarget = maxLogFileSize * 3 / 4; // Truncate to 75% capacity
+unsigned long maxLogWriteMs = 0;
+static bool logReady = false;
 
+/** Mount persistent diagnostics without formatting a failed filesystem. */
 void initiateLog() {
-    if (!LittleFS.begin()) {
+    LittleFSConfig config;
+    config.setAutoFormat(false);
+    LittleFS.setConfig(config);
+    logReady = LittleFS.begin();
+    if (!logReady) {
         Serial.println("[LOG] LittleFS mount failed");
         return;
     }
@@ -29,10 +35,12 @@ void initiateLog() {
     }
 }
 
+/** Label unsynchronized time explicitly; every log entry also includes uptime. */
 String getTimestamp() {
     time_t now;
     struct tm timeinfo;
     time(&now);
+    if (now < 1609459200) return "clock-unsynced";
     localtime_r(&now, &timeinfo);
     unsigned long millisecond = millis() % 1000;
     char buffer[30];
@@ -53,6 +61,7 @@ String getTimestamp() {
     return String(buffer);
 }
 
+/** Rotate by rename instead of copying 75KB in the input-processing thread. */
 void truncateLogIfNeeded() {
     File logFile = LittleFS.open(logFilePath, "r");
     if (!logFile) {
@@ -66,55 +75,30 @@ void truncateLogIfNeeded() {
         return;
     }
 
-    // Skip oldest bytes to keep truncateTarget worth of data
-    size_t skipBytes = fileSize - truncateTarget;
-    logFile.seek(skipBytes);
-
-    // Read forward to the next newline to avoid a partial line
-    char buf[256];
-    size_t bytesRead = logFile.readBytes(buf, sizeof(buf));
-    size_t newlineOffset = 0;
-    for (size_t i = 0; i < bytesRead; i++) {
-        if (buf[i] == '\n') {
-            newlineOffset = i + 1;
-            break;
-        }
-    }
-
-    // Position at first complete line after skip
-    size_t copyFrom = skipBytes + newlineOffset;
-    logFile.seek(copyFrom);
-
-    // Copy remaining data to temp file using fixed buffer (no heap String)
-    File tmpFile = LittleFS.open(logTempPath, "w");
-    if (!tmpFile) {
-        logFile.close();
-        Serial.println("[LOG] Failed to create temp file for truncation");
-        return;
-    }
-
-    tmpFile.println("--- Older entries removed due to size limit ---");
-
-    while (logFile.available()) {
-        size_t n = logFile.readBytes(buf, sizeof(buf));
-        tmpFile.write((uint8_t*)buf, n);
-    }
-
     logFile.close();
-    tmpFile.close();
-
-    // Replace original with truncated version
-    LittleFS.remove(logFilePath);
-    LittleFS.rename(logTempPath, logFilePath);
+    if (LittleFS.exists(previousLogFilePath)) LittleFS.remove(previousLogFilePath);
+    if (!LittleFS.rename(logFilePath, previousLogFilePath)) {
+        Serial.println("[LOG] Rotation failed; keeping current log");
+    }
 }
 
+/** Persist uptime with wall time and measure storage latency without recursive logging. */
 void logMessage(const String& message) {
-    String timestampedMessage = "[" + getTimestamp() + "] " + message;
+    unsigned long started = millis();
+    String timestampedMessage;
+    timestampedMessage.reserve(message.length() + 64);
+    timestampedMessage += "[";
+    timestampedMessage += getTimestamp();
+    timestampedMessage += "][up_ms=";
+    timestampedMessage += started;
+    timestampedMessage += "] ";
+    timestampedMessage += message;
 
     if (Serial) {
         Serial.println(timestampedMessage.c_str());
     }
 
+    if (!logReady) return;
     truncateLogIfNeeded();
 
     File logFile = LittleFS.open(logFilePath, "a");
@@ -124,6 +108,7 @@ void logMessage(const String& message) {
     }
     logFile.println(timestampedMessage);
     logFile.close();
+    maxLogWriteMs = max(maxLogWriteMs, millis() - started);
 }
 
 String readLog() {

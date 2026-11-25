@@ -4,6 +4,8 @@
 #include <Arduino.h>
 
 extern const char* logFilePath;
+extern const char* previousLogFilePath;
+extern unsigned long maxLogWriteMs;
 
 String        getTimestamp();
 

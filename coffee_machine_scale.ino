@@ -24,7 +24,7 @@
 
 #define MY_TZ           "CET-1CEST,M3.5.0/02,M10.5.0/03"
 #define MY_NTP_SERVER   "pool.ntp.org"
-#define WIFI_CHECK_INTERVAL   10000
+#define WIFI_CHECK_INTERVAL   30000
 #define RSSI_LOG_INTERVAL     600000
 #define MQTT_STATE_INTERVAL   30000
 
@@ -106,6 +106,14 @@ unsigned long  lastWiFiCheck         = 0;
 unsigned long  lastRssiLog           = 0;
 unsigned long  lastMqttStatePublish  = 0;
 bool           wifiConnected        = false;
+WiFiEventHandler wifiDisconnectHandler;
+bool           wifiDisconnectEvent  = false;
+uint8_t        lastWiFiDisconnectReason = 0;
+unsigned long  wifiDisconnectedAt   = 0;
+unsigned long  wifiReconnectCount   = 0;
+bool           otaStarted           = false;
+unsigned long  slowOperationCount   = 0;
+unsigned long  maxOperationMs       = 0;
 
 // Shot profile storage (item 12)
 #define MAX_PROFILE_POINTS 300
@@ -239,6 +247,21 @@ void showTaringScreen() {
   display.sendBuffer();
 }
 
+/** Draw a WiFi icon, crossed out until the station has an IP address. */
+void showWiFiIcon() {
+  const uint8_t x = 114;
+  const uint8_t y = 2;
+  display.drawXBMP(x, y, wifiIconBitmapWidth, wifiIconBitmapHeight, wifiIconBitmap);
+  if (WiFi.status() != WL_CONNECTED) {
+    display.setDrawColor(0);
+    display.drawLine(x, y - 1, x + 12, y + 9);
+    display.drawLine(x, y + 1, x + 12, y + 11);
+    display.setDrawColor(1);
+    display.drawLine(x, y, x + 12, y + 10);
+  }
+}
+
+/** Render menu choices with network status in the unused top-right corner. */
 void showMainMenu() {
   currentScreen = MenuScreen;
 
@@ -249,6 +272,7 @@ void showMainMenu() {
     String lineText = selectionIndicator + getMenuItemString(mainMenu[i]);
     display.drawStr(0, 15 * (i + 1), lineText.c_str());
   }
+  showWiFiIcon();
   display.sendBuffer();
 }
 
@@ -324,15 +348,19 @@ void saveProfile() {
   f.close();
 }
 
+/** Show device information with a compact IP row that fits any IPv4 address. */
 void showInfo() {
   currentScreen = InfoScreen;
-  String shotMadeString = String(grindedDosesCount);
 
   display.clearBuffer();
   display.setFont(SMALL_FONT);
   display.drawStr(0, 15, (String("Shots: ") + String(grindedDosesCount)).c_str());
   display.drawStr(0, 30, (String("Last time: ") + String(float(lastShotTime) / 1000, 1)).c_str());
-  display.drawStr(0, 45, (String("IP: ") + WiFi.localIP().toString()).c_str());
+  display.setFont(u8g2_font_6x10_tf);
+  String ipLine = WiFi.status() == WL_CONNECTED
+    ? String("IP: ") + WiFi.localIP().toString() : String("IP: offline");
+  display.drawStr(0, 45, ipLine.c_str());
+  display.setFont(SMALL_FONT);
   display.drawStr(0, 60, (String("Net: ") + WiFi.SSID()).c_str());
   display.sendBuffer();
 }
@@ -341,43 +369,52 @@ void showInfo() {
   Helper functions
 */
 
+/** Start association in the background so the menu is usable without a network. */
 void turnOnWiFi() {
+  WiFi.persistent(false);
   WiFi.mode(WIFI_STA);
+  WiFi.hostname(deviceId);
+  WiFi.setAutoReconnect(true);
+  wifiDisconnectHandler = WiFi.onStationModeDisconnected([](const WiFiEventStationModeDisconnected& event) {
+    lastWiFiDisconnectReason = event.reason;
+    wifiDisconnectEvent = true;
+  });
+  wifiDisconnectedAt = lastWiFiCheck = millis();
   WiFi.begin(ssid, password);
-  Serial.print("\nConnecting");
-  unsigned long wifiStart = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - wifiStart < 15000) {
-    Serial.print(".");
-    delay(500);
-  }
-  if (WiFi.status() == WL_CONNECTED) {
-    wifiConnected = true;
-    Serial.println("\nConnected. IP address:");
-    Serial.println(WiFi.localIP());
-  } else {
-    wifiConnected = false;
-    Serial.println("\nWiFi connection timed out, continuing offline");
-  }
+  logMessage("[WIFI] Connecting in background; local controls available offline");
 }
 
+/** Observe link changes and request retries without waiting for association or DHCP. */
 void handleWiFi() {
   unsigned long now = millis();
+  bool connected = WiFi.status() == WL_CONNECTED;
 
-  if (now - lastWiFiCheck < WIFI_CHECK_INTERVAL) return;
-  lastWiFiCheck = now;
-
-  if (WiFi.status() != WL_CONNECTED) {
-    logMessage("[WIFI] Connection lost, reconnecting...");
-    WiFi.disconnect();
-    WiFi.begin(ssid, password);
-    unsigned long start = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - start < 10000) {
-      delay(250);
-    }
-    if (WiFi.status() == WL_CONNECTED) {
-      logMessage("[WIFI] Reconnected. IP: " + WiFi.localIP().toString());
+  if (wifiDisconnectEvent) {
+    wifiDisconnectEvent = false;
+    logMessage("[WIFI] Disconnected, reason=" + String(lastWiFiDisconnectReason) +
+               ", status=" + String(WiFi.status()));
+  }
+  if (connected != wifiConnected) {
+    wifiConnected = connected;
+    if (currentScreen == MenuScreen) showMainMenu();
+    else if (currentScreen == InfoScreen) showInfo();
+    if (connected) {
+      logMessage("[WIFI] Connected. IP: " + WiFi.localIP().toString() +
+                 ", offline_ms=" + String(now - wifiDisconnectedAt) +
+                 ", RSSI=" + String(WiFi.RSSI()));
     } else {
-      Serial.println("[WIFI] Reconnection failed, will retry");
+      wifiDisconnectedAt = lastWiFiCheck = now;
+      logMessage("[WIFI] Link unavailable; controls remain active");
+    }
+  }
+
+  if (!connected) {
+    if (now - lastWiFiCheck >= WIFI_CHECK_INTERVAL) {
+      lastWiFiCheck = now;
+      ++wifiReconnectCount;
+      bool requested = WiFi.reconnect();
+      logMessage("[WIFI] Background retry=" + String(wifiReconnectCount) +
+                 ", requested=" + String(requested) + ", status=" + String(WiFi.status()));
     }
     return;
   }
@@ -387,6 +424,55 @@ void handleWiFi() {
     int rssi = WiFi.RSSI();
     const char* quality = rssi >= -50 ? "Excellent" : rssi >= -60 ? "Good" : rssi >= -70 ? "Fair" : rssi >= -80 ? "Weak" : "Poor";
     logMessage(String("[WIFI] RSSI: ") + rssi + " dBm (" + quality + ")");
+  }
+}
+
+/** Report unexpectedly slow work, rate-limited to avoid a diagnostic log storm. */
+void logSlowOperation(const char* operation, unsigned long started) {
+  unsigned long elapsed = millis() - started;
+  if (elapsed < 250) return;
+  ++slowOperationCount;
+  maxOperationMs = max(maxOperationMs, elapsed);
+  static unsigned long lastReport = 0;
+  if (slowOperationCount != 1 && millis() - lastReport < 30000) return;
+  lastReport = millis();
+  logMessage(String("[SLOW] ") + operation + ", elapsed_ms=" + String(elapsed) +
+             ", screen=" + String(currentScreen) + ", heap=" + String(ESP.getFreeHeap()));
+}
+
+/** Service optional networking and diagnostics outside the pump-control loop. */
+void handleBackground() {
+  unsigned long started = millis();
+  handleWiFi();
+  logSlowOperation("wifi", started);
+
+  started = millis();
+  if (wifiConnected && !otaStarted) {
+    OTA::initialize(deviceId);
+    otaStarted = true;
+    logMessage("[OTA] Ready");
+  }
+  if (otaStarted) OTA::handle();
+  logSlowOperation("ota", started);
+
+  started = millis();
+  handleMqtt();
+  unsigned long now = millis();
+  if (now - lastMqttStatePublish >= MQTT_STATE_INTERVAL) {
+    lastMqttStatePublish = now;
+    publishAllStates();
+  }
+  logSlowOperation("mqtt", started);
+
+  static unsigned long lastHealthLog = 0;
+  if (now - lastHealthLog >= 60000) {
+    lastHealthLog = now;
+    logMessage("[HEALTH] heap=" + String(ESP.getFreeHeap()) +
+               ", max_block=" + String(ESP.getMaxFreeBlockSize()) +
+               ", fragmentation=" + String(ESP.getHeapFragmentation()) +
+               ", wifi=" + String(WiFi.status()) + ", mqtt=" + String(mqttClient.connected()) +
+               ", screen=" + String(currentScreen) + ", slow_count=" + String(slowOperationCount) +
+               ", slow_max_ms=" + String(maxOperationMs) + ", log_max_ms=" + String(maxLogWriteMs));
   }
 }
 
@@ -655,6 +741,7 @@ float medianOfFive(float a[], int n) {
   return tmp[n / 2];
 }
 
+/** Run extraction and settling, then keep the result screen responsive until dismissed. */
 void startExtraction() {
   currentScreen = Timer;
 
@@ -844,16 +931,20 @@ void startExtraction() {
                        finalWeight, timePassed, doseType, stopReason);
 
   // Save shot profile to LittleFS
+  unsigned long saveStarted = millis();
   saveProfile();
+  logSlowOperation("save-profile", saveStarted);
 
   // Show locked final weight until button release
   showWeight(finalWeight, title.c_str());
   while (true) {
     pushButton.read();
     if (pushButton.wasReleased()) break;
+    handleBackground();
     yield();
   }
   lastActivityMillis = millis();
+  encoderPosition = readRotaryEncoder();
   showMainMenu();
 }
 
@@ -877,6 +968,7 @@ bool wakeUp () {
   return true;
 }
 
+/** Initialize local controls before starting optional, asynchronous network services. */
 void setup() {
   pinMode(RELAY_PIN, OUTPUT);
   digitalWrite(RELAY_PIN, LOW);
@@ -890,8 +982,12 @@ void setup() {
   // Enable hardware watchdog for extraction safety
   ESP.wdtEnable(8000);
 
+  initiateLog();
+  logMessage("[BOOT] Reset reason: " + ESP.getResetReason() + ", heap=" + String(ESP.getFreeHeap()));
+  logMessage("[BOOT] Reset details: " + ESP.getResetInfo());
+
   // Initiate rotary encoder
-  pinMode(ENCODER_BUTTON, INPUT_PULLUP);
+  pushButton.begin();
   initRotaryEncoder(ENCODER_A, ENCODER_B);
 
   // Initiate load cells
@@ -907,13 +1003,7 @@ void setup() {
   display.begin();
   display.setBusClock(BUS_CLOCK_SPEED);
   showWelcomeScreen();
-
-  // Start WiFi and NTP
-  turnOnWiFi();
-  configTime(MY_TZ, MY_NTP_SERVER);
-
-  // Start the file system and logging
-  initiateLog();
+  logMessage("[BOOT] Display, load cells and controls initialized");
 
   // Inititate eeprom and load variables from persistent memory
   initiateMemory();
@@ -932,8 +1022,10 @@ void setup() {
     writeToMemory(CORRECTION_TIME_ADDRESS, correctionTimeMs);
   }
 
-  // Initiate over the air programming
-  OTA::initialize(deviceId);
+  logMessage("[BOOT] Settings loaded");
+
+  turnOnWiFi();
+  configTime(MY_TZ, MY_NTP_SERVER);
 
   // Initiate MQTT
   initiateMqtt();
@@ -974,6 +1066,14 @@ void setup() {
     request->send(LittleFS, logFilePath, "text/plain");
   });
 
+  server.on("/log/previous", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (LittleFS.exists(previousLogFilePath)) {
+      request->send(LittleFS, previousLogFilePath, "text/plain");
+    } else {
+      request->send(404, "text/plain", "No previous log");
+    }
+  });
+
   server.on("/api/profile", HTTP_GET, [](AsyncWebServerRequest *request) {
     if (LittleFS.exists("/last_shot.json")) {
       request->send(LittleFS, "/last_shot.json", "application/json");
@@ -991,21 +1091,12 @@ void setup() {
 
   showMainMenu();
 
-  publishAllStates();
-  logMessage("[MAIN] Setup complete. IP: " + WiFi.localIP().toString());
+  lastActivityMillis = millis();
+  logMessage("[BOOT] Menu ready, setup_ms=" + String(millis()) + ", wifi=" + String(WiFi.status()));
 }
 
+/** Prioritize physical input before servicing nonblocking network tasks. */
 void loop() {
-  OTA::handle();
-  handleWiFi();
-  handleMqtt();
-
-  unsigned long now = millis();
-  if (now - lastMqttStatePublish >= MQTT_STATE_INTERVAL) {
-    lastMqttStatePublish = now;
-    publishAllStates();
-  }
-
   // Process change in the rotary encoder position
   long newPosition = readRotaryEncoder();
   if (newPosition != encoderPosition) {
@@ -1039,4 +1130,5 @@ void loop() {
   if (millis() - lastActivityMillis > 5 * 60 * 1000) {
     goToSleepMode();
   }
+  handleBackground();
 }
