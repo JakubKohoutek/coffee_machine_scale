@@ -50,7 +50,20 @@ The UI is driven by a `Screen` enum with these states: `MenuScreen`, `SettingsSc
 
 ### Extraction Flow
 
-`startExtraction()` is the core routine: it tares the load cells, turns on the relay (pump), reads weight through a 5-element median filter (rejects vibration spikes with less lag than averaging), applies a correction for initial vibration (after `timeOfCorrection` seconds), and stops when `correctedWeight > weightLimit - overshoot`. After pump stops, waits 3 seconds for liquid to settle (skippable via button), then locks the final weight on the OLED display until the user presses the button. Shot profile (weight over time) is captured every 200ms and saved to LittleFS.
+`startExtraction()` is the core routine: it tares the load cells, turns on the relay (pump), reads weight through a 5-element median filter (rejects vibration spikes with less lag than averaging), applies a correction for initial vibration (after `timeOfCorrection` seconds), and stops when `correctedWeight > weightLimit - overshoot`. After pump stops, waits 3 seconds for liquid to settle (skippable via button), then computes flow stats (`computeFlowStats()`), updates overshoot tracking (`updateOvershootAverage()`), saves the shot profile and history, and locks the final weight on the OLED display until the user presses the button. Shot profile (weight over time) is captured every 200ms and saved to LittleFS.
+
+#### Flow Rate Stats (`ShotStats` struct)
+After each extraction, `computeFlowStats()` iterates the shot profile to compute:
+- **Average flow rate** (g/s) — final weight / (total time - correction time)
+- **Peak flow rate** (g/s) — max of 5-point centered moving average of inter-point rates
+- **Time to first drip** (seconds) — first profile point where weight > 0.5g
+- **Weight at pump stop** — captured at relay off, used for overshoot tracking
+
+#### Overshoot Auto-Learning
+`updateOvershootAverage()` tracks actual vs configured overshoot per portafilter type. After each target-reached extraction, actual overshoot (settled weight - weight at pump stop) is fed into an EMA: true running average for the first 10 shots, then alpha=0.1. Values are persisted in EEPROM and displayed in the web UI below each overshoot setting.
+
+#### Shot History
+`addShotToHistory()` stores the last 20 shot summaries in `/shot_history.json` (LittleFS). Each entry includes shot number, weight, time, flow stats, dose type, portafilter, configured/actual overshoot, and stop reason. Exposed via `/api/history` and displayed in a table in the web UI.
 
 `handleBackground()` services WiFi, MQTT, OTA, and health diagnostics from the main loop (after physical input) and the locked result screen, but not inside pump/settling loops. WiFi startup and retries never wait for association; OTA initializes after the first connection. Logs include boot/reset details, WiFi disconnect reason codes, MQTT timings, and rate-limited slow-operation reports.
 
@@ -62,20 +75,24 @@ All values are stored as `unsigned long` at fixed addresses (weights in milligra
 - Overshoot (post-flow weight) per portafilter type: naked vs spouted, single vs double (addresses 16–28)
 - Magic byte for corruption detection (address 32)
 - Correction time — initial vibration settling period in ms (address 36, default 1200ms)
+- Actual overshoot averages in mg per portafilter type (addresses 40–52)
+- Sample counts for overshoot averaging (addresses 56–68)
+- EEPROM size: 80 bytes
 
 ### Web Interface & API
 
-- **Web UI** at `http://<IP>/` — configure all EEPROM settings (dose targets, overshoot), view status and shot profile chart
+- **Web UI** at `http://<IP>/` — warm copper/espresso-themed instrument panel UI. Configure all EEPROM settings (dose targets, overshoot), view status and shot profile chart with oscilloscope-style grid. Flow rate curve uses 5-point centered moving average for smooth display (raw rates shown in hover tooltips).
 - **`GET /api/status`** — JSON with all settings and device status
 - **`GET /api/send?cmd=<command>`** — set values (e.g., `setSingleDose:36000`), with input validation
-- **`GET /api/profile`** — JSON array of last shot profile (`[{"t":ms,"w":grams},...]`)
+- **`GET /api/profile`** — JSON with stats and profile: `{"stats":{"avgFlow","peakFlow","firstDrip"},"profile":[{"t":ms,"w":grams},...]}`
+- **`GET /api/history`** — JSON array of last 20 shot summaries
 - **`GET /log`** — view log file
 - **`GET /log/previous`** — previous rotated log file
 - Device auto-sleeps after 5 minutes of inactivity (display power save)
 
 ### MQTT
 
-Topics under `coffee_scale/`: `available`, `singleDose`, `doubleDose`, `singleNakedOvershoot`, `singleSpoutedOvershoot`, `doubleNakedOvershoot`, `doubleSpoutedOvershoot`, `shotCount`, `lastShotTime`, `sleep`, `event`, `command`. The `event` topic publishes JSON with weight/time/dose/reason for extraction_complete and extraction_stopped events. See `HOME_ASSISTANT_MQTT.md` for HA integration guide.
+Topics under `coffee_scale/`: `available`, `singleDose`, `doubleDose`, `singleNakedOvershoot`, `singleSpoutedOvershoot`, `doubleNakedOvershoot`, `doubleSpoutedOvershoot`, `shotCount`, `lastShotTime`, `lastShot`, `sleep`, `event`, `command`. The `event` topic publishes JSON with weight/time/dose/reason/avgFlow/peakFlow/firstDrip for extraction_complete and extraction_stopped events. The `lastShot` topic (retained) publishes a compact JSON summary after each shot. See `HOME_ASSISTANT_MQTT.md` for HA integration guide.
 
 ## Libraries
 

@@ -38,6 +38,16 @@
 #define DOUBLE_SPOUT_ADDRESS 28
 // MAGIC_ADDRESS is 32 (defined in memory.cpp)
 #define CORRECTION_TIME_ADDRESS 36
+// Actual overshoot averages (mg)
+#define ACTUAL_SINGLE_NAKED_ADDR 40
+#define ACTUAL_SINGLE_SPOUT_ADDR 44
+#define ACTUAL_DOUBLE_NAKED_ADDR 48
+#define ACTUAL_DOUBLE_SPOUT_ADDR 52
+// Sample counts for overshoot averaging
+#define SAMPLE_COUNT_SN_ADDR 56
+#define SAMPLE_COUNT_SS_ADDR 60
+#define SAMPLE_COUNT_DN_ADDR 64
+#define SAMPLE_COUNT_DS_ADDR 68
 
 #define OLED         U8G2_SH1106_128X64_NONAME_F_HW_I2C
 #define SMALL_FONT   u8g2_font_8x13B_tf // XE font group
@@ -123,6 +133,24 @@ struct ProfilePoint {
 };
 ProfilePoint   shotProfile[MAX_PROFILE_POINTS];
 int            profilePointCount    = 0;
+
+struct ShotStats {
+  float avgFlowRate;       // g/s, after correction period
+  float peakFlowRate;      // g/s, smoothed (5-point moving avg)
+  float timeToFirstDrip;   // seconds from start until weight > 0.5g
+  float weightAtPumpStop;  // weight when pump stopped (for overshoot tracking)
+};
+ShotStats lastShotStats;
+
+// Actual overshoot tracking
+unsigned long  actualSingleNaked      = 0;
+unsigned long  actualSingleSpouted    = 0;
+unsigned long  actualDoubleNaked      = 0;
+unsigned long  actualDoubleSpouted    = 0;
+unsigned long  sampleCountSN          = 0;
+unsigned long  sampleCountSS          = 0;
+unsigned long  sampleCountDN          = 0;
+unsigned long  sampleCountDS          = 0;
 
 AsyncWebServer server(80);
 OLED           display(U8G2_R0, U8X8_PIN_NONE);
@@ -335,7 +363,11 @@ void showExtractionWeight(float weight, float timeSec, float targetWeight) {
 void saveProfile() {
   File f = LittleFS.open("/last_shot.json", "w");
   if (!f) return;
-  f.print("[");
+  f.print("{\"stats\":{");
+  f.print("\"avgFlow\":" + String(lastShotStats.avgFlowRate, 2));
+  f.print(",\"peakFlow\":" + String(lastShotStats.peakFlowRate, 2));
+  f.print(",\"firstDrip\":" + String(lastShotStats.timeToFirstDrip, 1));
+  f.print("},\"profile\":[");
   for (int i = 0; i < profilePointCount; i++) {
     if (i > 0) f.print(",");
     f.print("{\"t\":");
@@ -344,8 +376,155 @@ void saveProfile() {
     f.print(String(shotProfile[i].weight, 1));
     f.print("}");
   }
-  f.print("]");
+  f.print("]}");
   f.close();
+}
+
+void computeFlowStats() {
+  lastShotStats.avgFlowRate = 0;
+  lastShotStats.peakFlowRate = 0;
+  lastShotStats.timeToFirstDrip = 0;
+
+  if (profilePointCount < 2) return;
+
+  // Time to first drip: first point where weight > 0.5g
+  for (int i = 0; i < profilePointCount; i++) {
+    if (shotProfile[i].weight > 0.5f) {
+      lastShotStats.timeToFirstDrip = shotProfile[i].timeMs / 1000.0f;
+      break;
+    }
+  }
+
+  // Compute raw flow rates between consecutive points
+  float rates[MAX_PROFILE_POINTS];
+  int rateCount = profilePointCount - 1;
+  for (int i = 0; i < rateCount; i++) {
+    float dt = (shotProfile[i + 1].timeMs - shotProfile[i].timeMs) / 1000.0f;
+    float rate = dt > 0 ? (shotProfile[i + 1].weight - shotProfile[i].weight) / dt : 0;
+    rates[i] = rate < 0 ? 0 : rate;
+  }
+
+  // 5-point centered moving average + find peak
+  float peakSmoothed = 0;
+  int win = 2;
+  for (int i = 0; i < rateCount; i++) {
+    float sum = 0;
+    int cnt = 0;
+    for (int j = max(0, i - win); j <= min(rateCount - 1, i + win); j++) {
+      sum += rates[j];
+      cnt++;
+    }
+    float smoothed = sum / cnt;
+    if (smoothed > peakSmoothed) peakSmoothed = smoothed;
+  }
+  lastShotStats.peakFlowRate = peakSmoothed;
+
+  // Average flow rate: final weight / (total time - correction time)
+  float totalTimeSec = shotProfile[profilePointCount - 1].timeMs / 1000.0f;
+  float corrTimeSec = correctionTimeMs / 1000.0f;
+  float effectiveTime = totalTimeSec - corrTimeSec;
+  if (effectiveTime > 0) {
+    lastShotStats.avgFlowRate = shotProfile[profilePointCount - 1].weight / effectiveTime;
+  }
+}
+
+void updateOvershootAverage(bool targetReached) {
+  if (!targetReached) return;
+
+  // Compute actual overshoot: settled weight minus weight at pump stop
+  float actualOvershootG = shotProfile[profilePointCount - 1].weight - lastShotStats.weightAtPumpStop;
+  if (actualOvershootG < 0) actualOvershootG = 0;
+  unsigned long actualOvershootMg = (unsigned long)(actualOvershootG * 1000);
+
+  // Select the correct address pair based on dose type and portafilter
+  unsigned long *avgPtr, *countPtr;
+  int avgAddr, countAddr;
+  if (*selectedItem == SingleDose && selectedPortafilter == BottomLess) {
+    avgPtr = &actualSingleNaked; countPtr = &sampleCountSN;
+    avgAddr = ACTUAL_SINGLE_NAKED_ADDR; countAddr = SAMPLE_COUNT_SN_ADDR;
+  } else if (*selectedItem == SingleDose && selectedPortafilter == Spouted) {
+    avgPtr = &actualSingleSpouted; countPtr = &sampleCountSS;
+    avgAddr = ACTUAL_SINGLE_SPOUT_ADDR; countAddr = SAMPLE_COUNT_SS_ADDR;
+  } else if (*selectedItem == DoubleDose && selectedPortafilter == BottomLess) {
+    avgPtr = &actualDoubleNaked; countPtr = &sampleCountDN;
+    avgAddr = ACTUAL_DOUBLE_NAKED_ADDR; countAddr = SAMPLE_COUNT_DN_ADDR;
+  } else {
+    avgPtr = &actualDoubleSpouted; countPtr = &sampleCountDS;
+    avgAddr = ACTUAL_DOUBLE_SPOUT_ADDR; countAddr = SAMPLE_COUNT_DS_ADDR;
+  }
+
+  // EMA: first 10 shots = true running average, then alpha=0.1
+  if (*countPtr < 10) {
+    *avgPtr = (*avgPtr * *countPtr + actualOvershootMg) / (*countPtr + 1);
+  } else {
+    *avgPtr = (unsigned long)(0.9f * *avgPtr + 0.1f * actualOvershootMg);
+  }
+  (*countPtr)++;
+
+  writeToMemory(avgAddr, *avgPtr);
+  writeToMemory(countAddr, *countPtr);
+
+  logMessage("[OVERSHOOT] Actual: " + String(actualOvershootG, 1) + "g, Avg: " + String(*avgPtr / 1000.0f, 1) + "g (n=" + String(*countPtr) + ")");
+}
+
+void addShotToHistory(float finalWeight, float timePassed, const char* doseType, const char* stopReason) {
+  // Build new entry JSON
+  String entry = "{\"n\":" + String(grindedDosesCount);
+  entry += ",\"w\":" + String(finalWeight, 1);
+  entry += ",\"t\":" + String(timePassed, 1);
+  entry += ",\"dose\":\"" + String(doseType) + "\"";
+  entry += ",\"pf\":\"" + String(selectedPortafilter == BottomLess ? "naked" : "spouted") + "\"";
+  entry += ",\"avgFlow\":" + String(lastShotStats.avgFlowRate, 2);
+  entry += ",\"peakFlow\":" + String(lastShotStats.peakFlowRate, 2);
+  entry += ",\"firstDrip\":" + String(lastShotStats.timeToFirstDrip, 1);
+  entry += ",\"overshootCfg\":" + String(*getOvershootPtr() / 1000.0f, 1);
+  float actualOv = (shotProfile[profilePointCount - 1].weight - lastShotStats.weightAtPumpStop);
+  if (actualOv < 0) actualOv = 0;
+  entry += ",\"overshootActual\":" + String(actualOv, 1);
+  entry += ",\"reason\":\"" + String(stopReason) + "\"}";
+
+  // Read existing history
+  String history = "[]";
+  if (LittleFS.exists("/shot_history.json")) {
+    File f = LittleFS.open("/shot_history.json", "r");
+    if (f) {
+      history = f.readString();
+      f.close();
+    }
+  }
+
+  // Prepend new entry, trim to 20 max
+  String newHistory = "[" + entry;
+  if (history.length() > 2) {  // not empty "[]"
+    // Find entries and count them
+    String existing = history.substring(1, history.length() - 1); // strip [ ]
+    // Count commas at top level to count entries
+    int count = 1;
+    int depth = 0;
+    int trimPos = existing.length();
+    for (unsigned int i = 0; i < existing.length(); i++) {
+      if (existing[i] == '{') depth++;
+      else if (existing[i] == '}') depth--;
+      else if (existing[i] == ',' && depth == 0) {
+        count++;
+        if (count >= 20) {
+          trimPos = i;
+          break;
+        }
+      }
+    }
+    newHistory += "," + existing.substring(0, trimPos);
+  }
+  newHistory += "]";
+
+  // Atomic write via temp file
+  File f = LittleFS.open("/shot_history.tmp", "w");
+  if (f) {
+    f.print(newHistory);
+    f.close();
+    LittleFS.remove("/shot_history.json");
+    LittleFS.rename("/shot_history.tmp", "/shot_history.json");
+  }
 }
 
 /** Show device information with a compact IP row that fits any IPv4 address. */
@@ -860,6 +1039,7 @@ void startExtraction() {
   }
 
   digitalWrite(RELAY_PIN, LOW);
+  lastShotStats.weightAtPumpStop = finalWeight;
 
   // Compute title and stats before settling so the display is consistent throughout
   const char* stopReason;
@@ -926,14 +1106,35 @@ void startExtraction() {
     ? String("Stopped at ") + String(timePassed, 1) + "s"
     : String("Done at ") + String(timePassed, 1) + "s";
 
-  logMessage(String("[EXTRACTION] ") + title + ", weight: " + String(finalWeight, 1) + "g");
-  mqttPublishEventJson(stopped ? "extraction_stopped" : "extraction_complete",
-                       finalWeight, timePassed, doseType, stopReason);
+  // Compute flow stats and update overshoot tracking
+  computeFlowStats();
+  updateOvershootAverage(!stopped);
 
-  // Save shot profile to LittleFS
+  logMessage(String("[EXTRACTION] ") + title + ", weight: " + String(finalWeight, 1) + "g"
+    + ", avgFlow: " + String(lastShotStats.avgFlowRate, 1) + "g/s"
+    + ", peakFlow: " + String(lastShotStats.peakFlowRate, 1) + "g/s"
+    + ", firstDrip: " + String(lastShotStats.timeToFirstDrip, 1) + "s");
+  mqttPublishEventJson(stopped ? "extraction_stopped" : "extraction_complete",
+                       finalWeight, timePassed, doseType, stopReason,
+                       lastShotStats.avgFlowRate, lastShotStats.peakFlowRate,
+                       lastShotStats.timeToFirstDrip);
+
+  // Save shot profile and history to LittleFS
   unsigned long saveStarted = millis();
   saveProfile();
-  logSlowOperation("save-profile", saveStarted);
+  addShotToHistory(finalWeight, timePassed, doseType, stopReason);
+  logSlowOperation("save-profile/history", saveStarted);
+
+  // Publish compact last-shot summary on MQTT (retained)
+  {
+    String lastShot = "{\"n\":" + String(grindedDosesCount) +
+      ",\"w\":" + String(finalWeight, 1) +
+      ",\"t\":" + String(timePassed, 1) +
+      ",\"avgFlow\":" + String(lastShotStats.avgFlowRate, 2) +
+      ",\"peakFlow\":" + String(lastShotStats.peakFlowRate, 2) +
+      ",\"firstDrip\":" + String(lastShotStats.timeToFirstDrip, 1) + "}";
+    mqttPublishState("lastShot", lastShot.c_str());
+  }
 
   // Show locked final weight until button release
   showWeight(finalWeight, title.c_str());
@@ -1021,6 +1222,20 @@ void setup() {
     correctionTimeMs = 1200;
     writeToMemory(CORRECTION_TIME_ADDRESS, correctionTimeMs);
   }
+  // Load actual overshoot averages and sample counts
+  actualSingleNaked    = readFromMemory(ACTUAL_SINGLE_NAKED_ADDR);
+  actualSingleSpouted  = readFromMemory(ACTUAL_SINGLE_SPOUT_ADDR);
+  actualDoubleNaked    = readFromMemory(ACTUAL_DOUBLE_NAKED_ADDR);
+  actualDoubleSpouted  = readFromMemory(ACTUAL_DOUBLE_SPOUT_ADDR);
+  sampleCountSN        = readFromMemory(SAMPLE_COUNT_SN_ADDR);
+  sampleCountSS        = readFromMemory(SAMPLE_COUNT_SS_ADDR);
+  sampleCountDN        = readFromMemory(SAMPLE_COUNT_DN_ADDR);
+  sampleCountDS        = readFromMemory(SAMPLE_COUNT_DS_ADDR);
+  // Sanity check: unreasonable values indicate uninitialized EEPROM
+  if (sampleCountSN > 100000) { sampleCountSN = 0; actualSingleNaked = 0; }
+  if (sampleCountSS > 100000) { sampleCountSS = 0; actualSingleSpouted = 0; }
+  if (sampleCountDN > 100000) { sampleCountDN = 0; actualDoubleNaked = 0; }
+  if (sampleCountDS > 100000) { sampleCountDS = 0; actualDoubleSpouted = 0; }
 
   logMessage("[BOOT] Settings loaded");
 
@@ -1047,6 +1262,10 @@ void setup() {
     json += "\"lastShotTime\":" + String(lastShotTime) + ",";
     json += "\"sleep\":" + String(sleepModeActive ? "true" : "false") + ",";
     json += "\"correctionTime\":" + String(correctionTimeMs) + ",";
+    json += "\"actualSingleNaked\":" + String(actualSingleNaked) + ",";
+    json += "\"actualSingleSpouted\":" + String(actualSingleSpouted) + ",";
+    json += "\"actualDoubleNaked\":" + String(actualDoubleNaked) + ",";
+    json += "\"actualDoubleSpouted\":" + String(actualDoubleSpouted) + ",";
     json += "\"ip\":\"" + WiFi.localIP().toString() + "\"";
     json += "}";
     request->send(200, "application/json", json);
@@ -1077,6 +1296,14 @@ void setup() {
   server.on("/api/profile", HTTP_GET, [](AsyncWebServerRequest *request) {
     if (LittleFS.exists("/last_shot.json")) {
       request->send(LittleFS, "/last_shot.json", "application/json");
+    } else {
+      request->send(200, "application/json", "[]");
+    }
+  });
+
+  server.on("/api/history", HTTP_GET, [](AsyncWebServerRequest *request) {
+    if (LittleFS.exists("/shot_history.json")) {
+      request->send(LittleFS, "/shot_history.json", "application/json");
     } else {
       request->send(200, "application/json", "[]");
     }

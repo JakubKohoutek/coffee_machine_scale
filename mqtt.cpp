@@ -151,12 +151,16 @@ void mqttPublishEvent(const char* event) {
 }
 
 /** Queue the extraction summary without waiting for network traffic. */
-void mqttPublishEventJson(const char* event, float weight, float timeSec, const char* doseType, const char* stopReason) {
+void mqttPublishEventJson(const char* event, float weight, float timeSec, const char* doseType, const char* stopReason,
+                          float avgFlow, float peakFlow, float firstDrip) {
     if (!mqttClient.connected()) return;
     String json = "{\"event\":\"" + String(event) +
                   "\",\"weight\":" + String(weight, 1) +
                   ",\"time\":" + String(timeSec, 1) +
                   ",\"dose\":\"" + String(doseType) +
-                  "\",\"reason\":\"" + String(stopReason) + "\"}";
+                  "\",\"reason\":\"" + String(stopReason) +
+                  "\",\"avgFlow\":" + String(avgFlow, 2) +
+                  ",\"peakFlow\":" + String(peakFlow, 2) +
+                  ",\"firstDrip\":" + String(firstDrip, 1) + "}";
     mqttPublish(MQTT_EVENT_TOPIC, json.c_str(), false);
 }

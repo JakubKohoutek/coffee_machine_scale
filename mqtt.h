@@ -17,6 +17,7 @@ void handleMqtt();
 void mqttPublish(const char* topic, const char* payload, bool retained = false);
 void mqttPublishState(const char* key, const char* value);
 void mqttPublishEvent(const char* event);
-void mqttPublishEventJson(const char* event, float weight, float timeSec, const char* doseType, const char* stopReason);
+void mqttPublishEventJson(const char* event, float weight, float timeSec, const char* doseType, const char* stopReason,
+                          float avgFlow = 0, float peakFlow = 0, float firstDrip = 0);
 
 #endif // MQTT_H

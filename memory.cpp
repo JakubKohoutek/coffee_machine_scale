@@ -37,6 +37,16 @@ void writeDefaults () {
   writeToMemory(24, 2000);   // singleSpouted overshoot: 2g
   writeToMemory(28, 2000);   // doubleSpouted overshoot: 2g
   writeToMemory(36, 1200);   // correctionTime: 1.2s
+  // Actual overshoot averages (mg) — addresses 40-52
+  writeToMemory(40, 0);      // actualSingleNaked
+  writeToMemory(44, 0);      // actualSingleSpouted
+  writeToMemory(48, 0);      // actualDoubleNaked
+  writeToMemory(52, 0);      // actualDoubleSpouted
+  // Sample counts for overshoot averaging — addresses 56-68
+  writeToMemory(56, 0);      // sampleCountSN
+  writeToMemory(60, 0);      // sampleCountSS
+  writeToMemory(64, 0);      // sampleCountDN
+  writeToMemory(68, 0);      // sampleCountDS
   writeToMemory(MAGIC_ADDRESS, MAGIC_VALUE);
 }
 
@@ -48,7 +58,7 @@ bool isEepromBlank () {
 }
 
 void initiateMemory () {
-  EEPROM.begin(64);
+  EEPROM.begin(80);
   if (readFromMemory(MAGIC_ADDRESS) != MAGIC_VALUE) {
     if (isEepromBlank()) {
       // Truly uninitialized (first flash) — write sensible defaults

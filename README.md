@@ -49,9 +49,12 @@ Device web UI: http://coffee-machine-scale.local/ (currently http://192.168.68.7
 - **Correction time** — configurable initial settling period (default 1.2s) to ignore vibration after pump starts
 - **Settling delay** — waits 3s after pump stops for remaining liquid, then locks final weight on display
 - **Shot profile** — records weight every 200ms; viewable as a chart in the web UI
+- **Flow rate stats** — avg flow rate, peak flow rate, and time-to-first-drip computed after each shot; displayed in web UI and included in MQTT events
+- **Shot history** — last 20 shots stored on device with full stats; viewable in web UI table and via `/api/history`
+- **Overshoot auto-learning** — tracks actual vs configured overshoot per portafilter type using EMA; displays measured average in the web UI
 - **Dual portafilter support** — separate overshoot settings for naked/spouted, single/double
-- **Web UI** at `http://<IP>/` — configure dose targets, overshoot, view shot profile and logs
-- **MQTT** — publishes state under `coffee_scale/`, extraction events as JSON (weight, time, dose type, stop reason)
+- **Web UI** at `http://<IP>/` — configure dose targets, overshoot, view shot profile with flow stats, shot history, and logs
+- **MQTT** — publishes state under `coffee_scale/`, extraction events as JSON (weight, time, dose type, stop reason, flow stats), and retained `lastShot` summary
 - **OTA updates** — flash new firmware over WiFi
 - **Offline-capable** — WiFi association/retries and MQTT connections run in the background without blocking menu input or startup
 - **Responsive shot results** — networking stays serviced while the final weight is displayed, avoiding overdue reconnect work when returning to the menu
@@ -66,7 +69,8 @@ Device web UI: http://coffee-machine-scale.local/ (currently http://192.168.68.7
 | `GET /` | Web settings UI |
 | `GET /api/status` | JSON with all settings and device state |
 | `GET /api/send?cmd=<command>` | Set values (e.g. `setSingleDose:36000`) |
-| `GET /api/profile` | Last shot profile as JSON array |
+| `GET /api/profile` | Last shot profile with flow stats |
+| `GET /api/history` | Last 20 shot summaries as JSON array |
 | `GET /log` | Timestamped log file |
 | `GET /log/previous` | Previous rotated log file (404 until the first rotation) |
 
