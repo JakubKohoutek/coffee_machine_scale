@@ -92,7 +92,7 @@ All values are stored as `unsigned long` at fixed addresses (weights in milligra
 
 ### MQTT
 
-Topics under `coffee_scale/`: `available`, `singleDose`, `doubleDose`, `singleNakedOvershoot`, `singleSpoutedOvershoot`, `doubleNakedOvershoot`, `doubleSpoutedOvershoot`, `shotCount`, `lastShotTime`, `lastShot`, `sleep`, `event`, `command`. The `event` topic publishes JSON with weight/time/dose/reason/avgFlow/peakFlow/firstDrip for extraction_complete and extraction_stopped events. The `lastShot` topic (retained) publishes a compact JSON summary after each shot. See `HOME_ASSISTANT_MQTT.md` for HA integration guide.
+Topics under `coffee_scale/`: `available`, `singleDose`, `doubleDose`, `singleNakedOvershoot`, `singleSpoutedOvershoot`, `doubleNakedOvershoot`, `doubleSpoutedOvershoot`, `shotCount`, `lastShotTime`, `lastShot`, `sleep`, `rssi`, `event`, `command`. The `event` topic publishes JSON with weight/time/dose/reason/avgFlow/peakFlow/firstDrip for extraction_complete and extraction_stopped events. The `lastShot` topic (retained) publishes a compact JSON summary after each shot. The retained `rssi` topic publishes WiFi signal strength in dBm on MQTT connection and normal 30-second state updates while WiFi is connected. See `HOME_ASSISTANT_MQTT.md` for HA integration guide.
 
 ## Libraries
 

@@ -713,6 +713,7 @@ void handleCommand(const String& cmd) {
   }
 }
 
+/** Publish retained settings and status, including RSSI only while WiFi is connected. */
 void publishAllStates() {
   mqttPublishState("singleDose", String(singleShotLimit).c_str());
   mqttPublishState("doubleDose", String(doubleShotLimit).c_str());
@@ -723,6 +724,9 @@ void publishAllStates() {
   mqttPublishState("shotCount", String(grindedDosesCount).c_str());
   mqttPublishState("lastShotTime", String(lastShotTime).c_str());
   mqttPublishState("sleep", sleepModeActive ? "true" : "false");
+  if (WiFi.status() == WL_CONNECTED) {
+    mqttPublishState("rssi", String(WiFi.RSSI()).c_str());
+  }
   mqttPublish(MQTT_AVAILABLE_TOPIC, "online", true);
 }
 

@@ -35,9 +35,12 @@ The scale publishes to the following topics under `coffee_scale/`:
 | `coffee_scale/shotCount` | Retained | Total shot count |
 | `coffee_scale/lastShotTime` | Retained | Last shot duration (milliseconds) |
 | `coffee_scale/sleep` | Retained | `true` / `false` |
+| `coffee_scale/rssi` | Retained | WiFi signal strength in dBm, e.g. `-65`; updated while WiFi is connected |
 | `coffee_scale/event` | Not retained | `extraction_started` (plain string), `extraction_complete` / `extraction_stopped` (JSON: `{"event":"...","weight":36.1,"time":28.5,"dose":"double","reason":"target_reached"}`) |
 
 The scale subscribes to `coffee_scale/command` for remote setting changes (same format as the web API).
+
+RSSI is published on MQTT connection and with the normal 30-second state updates. Background state updates pause during extraction and scale measurement. The retained reading represents the last measurement; use the availability topic to mark the sensor unavailable when the device disconnects.
 
 ## 4. Home Assistant Configuration
 
@@ -46,6 +49,13 @@ Add to your `configuration.yaml`:
 ```yaml
 mqtt:
   sensor:
+    - name: "Coffee Scale WiFi Signal"
+      state_topic: "coffee_scale/rssi"
+      availability_topic: "coffee_scale/available"
+      device_class: signal_strength
+      state_class: measurement
+      unit_of_measurement: "dBm"
+
     - name: "Coffee Scale Shot Count"
       state_topic: "coffee_scale/shotCount"
       icon: "mdi:coffee"
